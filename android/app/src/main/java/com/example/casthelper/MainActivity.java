@@ -92,6 +92,12 @@ public class MainActivity extends AppCompatActivity {
         web = findViewById(R.id.web);
         routeButton = findViewById(R.id.routeButton);
 
+        // 界面上标出版本号,方便确认装的是不是新版(老版本没有这一行)。
+        try {
+            String ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            status.setText(status.getText() + "\n当前版本 v" + ver);
+        } catch (Exception ignored) {}
+
         try {
             castContext = CastContext.getSharedInstance(getApplicationContext());
             CastButtonFactory.setUpMediaRouteButton(getApplicationContext(), routeButton);
@@ -134,7 +140,8 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
-                urlBar.setText(url);
+                // 正在地址栏打字(比如输中文拼音)时,别让页面跳转把输入冲掉。
+                if (!urlBar.hasFocus()) urlBar.setText(url);
             }
         });
 
