@@ -48,6 +48,8 @@ public class MainActivity extends AppCompatActivity {
             {"爱奇艺", "https://www.iqiyi.com"},
             {"西瓜视频", "https://www.ixigua.com"},
             {"YouTube", "https://m.youtube.com"},
+            {"爱壹帆", "https://m.iyf.tv/"},
+            {"欧乐影院", "https://www.olevod.com/"},
     };
 
     private WebView web;
