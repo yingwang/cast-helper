@@ -145,7 +145,7 @@
         <CheckBox android:id="@+id/chkAutoNext"
             android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:textSize="13sp" android:checked="true"
-            android:text="自动连播(实验):一集放完自动接下一集,依赖网站自带连播"/>
+            android:text="自动连播(实验):一集放完自动接下一集,依赖网站自带连播;保持 App 打开更稳"/>
     </LinearLayout>
 
     <WebView
