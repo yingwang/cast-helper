@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 图标前景:电视屏幕 + 播放三角 + 左下角 cast 波纹 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 电视屏幕(白) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,36 L74,36 A5,5 0 0 1 79,41 L79,67 A5,5 0 0 1 74,72 L34,72 A5,5 0 0 1 29,67 L29,41 A5,5 0 0 1 34,36 Z"/>
+
+    <!-- 播放三角(蓝) -->
+    <path
+        android:fillColor="#1565C0"
+        android:pathData="M52,46 L68,54 L52,62 Z"/>
+
+    <!-- cast 波纹(蓝,叠在屏幕左下角) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1565C0"
+        android:strokeWidth="4"
+        android:pathData="M29,58 A14,14 0 0 1 43,72"/>
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#1565C0"
+        android:strokeWidth="4"
+        android:pathData="M29,50 A22,22 0 0 1 51,72"/>
+    <path
+        android:fillColor="#1565C0"
+        android:pathData="M29,66 A6,6 0 0 1 35,72 L29,72 Z"/>
+</vector>

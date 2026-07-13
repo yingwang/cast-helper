@@ -6,6 +6,10 @@ on:
     paths:
       - 'android/**'
       - '.github/workflows/android.yml'
+  pull_request:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android.yml'
   workflow_dispatch:
 
 permissions:
@@ -32,17 +36,17 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.6'
 
-      - name: Build debug APK
+      # release 包用仓库里固定的密钥签名(说明见 android/app/build.gradle),
+      # 版本号随 run_number 递增,用户可覆盖升级。
+      - name: Build release APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleRelease -PbuildNumber=${{ github.run_number }} --no-daemon --stacktrace
 
       - name: Stage APK
         run: |
           mkdir -p dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist/cast-helper.apk
+          cp android/app/build/outputs/apk/release/app-release.apk dist/cast-helper.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -51,13 +55,16 @@ jobs:
           path: dist/cast-helper.apk
 
       - name: Publish APK to release
-        if: github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: app-latest
           name: 电视投屏 App(最新版)
           body: |
             在 Boox(安卓)上下载 `cast-helper.apk` 安装即可。
+
+            ⚠️ 从 1.0(旧 debug 签名)升级:请先卸载旧版再安装,只需这一次;
+            此后版本签名固定,可直接覆盖升级。
 
             用法:打开 App → 选或输入视频网站 → 登录并播放 → 点「📺 投屏到电视」。
             第一次会弹出「选择电视」,选一次后自动开始投;之后点一下按钮就直接投。

@@ -6,9 +6,13 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
+import android.webkit.ValueCallback;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -26,6 +30,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.mediarouter.app.MediaRouteButton;
 
+import com.google.android.gms.cast.Cast;
 import com.google.android.gms.cast.MediaInfo;
 import com.google.android.gms.cast.MediaLoadRequestData;
 import com.google.android.gms.cast.MediaMetadata;
@@ -36,8 +41,10 @@ import com.google.android.gms.cast.framework.CastContext;
 import com.google.android.gms.cast.framework.CastSession;
 import com.google.android.gms.cast.framework.SessionManagerListener;
 import com.google.android.gms.cast.framework.media.RemoteMediaClient;
+import com.google.android.gms.common.api.ResultCallback;
 
 import java.util.Locale;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
@@ -69,8 +76,11 @@ public class MainActivity extends AppCompatActivity {
     private Button castBtn;
     private MediaRouteButton routeButton;
     private volatile String detectedUrl = null;
+    private volatile int detectedPriority = 0; // m3u8/mpd=2,mp4 等=1:防止贴片广告盖掉正片
     // 用户点了「投屏到电视」但还没连接电视时,先把要投的地址记在这里,选好电视后自动投。
     private String pendingUrl = null;
+    private long pendingPosMs = 0;  // 记地址时本地已看到的进度
+    private long pendingSetAt = 0;  // 记地址的时刻,太久没投就作废
     private CastContext castContext;
     private SessionManagerListener<CastSession> sessionListener;
 
@@ -89,12 +99,17 @@ public class MainActivity extends AppCompatActivity {
     private Button btnMute;
     private boolean userVolDragging = false;
     private CastSession castSession;
+    private boolean playErrorToasted = false; // 每次投出后,拉流失败只提示一次
+    // 电视遥控器/其他手机改了 Chromecast 音量时,同步刷新音量条。
+    private final Cast.Listener castListener = new Cast.Listener() {
+        @Override public void onVolumeChanged() { refreshControls(); }
+    };
 
     // 自动连播(实验):电视播完 → 让网页播放器跳到片尾触发网站自带连播
     // → 嗅探到不同于当前集的新直链 → 自动投出。
     private CheckBox chkAutoNext;
     private String lastCastUrl = null;
-    private boolean awaitingNext = false;
+    private volatile boolean awaitingNext = false;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final Runnable nextTimeout = new Runnable() {
         @Override public void run() {
@@ -153,29 +168,48 @@ public class MainActivity extends AppCompatActivity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                return false; // keep navigation inside the app
+                // 只放行 http(s)。视频站常用 intent:// 等链接把人拽去装它家 App,
+                // WebView 加载不了这类 scheme,会用 ERR_UNKNOWN_URL_SCHEME 错误页顶掉当前页面。
+                return !isHttp(request.getUrl().toString());
+            }
+
+            @SuppressWarnings("deprecation")
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) { // API 21–23 走这个重载
+                return !isHttp(url);
             }
 
             @Nullable
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 final String u = request.getUrl().toString();
-                if (STREAM.matcher(u).find()) {
-                    if (u.equals(detectedUrl)) return null; // 同一地址反复请求(播放列表刷新),不重复刷 UI
-                    detectedUrl = u;
+                final int pri = priorityOf(u);
+                if (pri > 0) {
+                    // 同一地址反复请求(播放列表刷新)不用重复刷 UI;但正等下一集时要放行:
+                    // 下一集可能早被网站预取过一次,再请求时地址相同,也得进自动连播判断。
+                    final boolean dup = u.equals(detectedUrl);
+                    if (dup && !awaitingNext) return null;
+                    // 低优先级(mp4 等)不覆盖已发现的 m3u8/mpd,免得贴片广告顶掉正片。
+                    final boolean better = pri >= detectedPriority;
+                    if (better) { detectedUrl = u; detectedPriority = pri; }
+                    if (!better && !awaitingNext) return null;
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            castBtn.setEnabled(true);
-                            status.setText("已发现视频,点下面「投屏到电视」\n" + shorten(u));
-                            // 自动连播:正等下一集时,嗅探到不同于当前集的新直链就自动投出。
-                            if (awaitingNext && !baseOf(u).equals(baseOf(lastCastUrl))) {
+                            if (better && !dup) {
+                                castBtn.setEnabled(true);
+                                status.setText("已发现视频,点下面「投屏到电视」\n" + shorten(u));
+                            }
+                            // 自动连播:正等下一集时,嗅探到不同于当前集、级别不低于当前集的
+                            // 新直链就自动投出(级别判断挡住集间贴片广告)。
+                            if (awaitingNext && pri >= priorityOf(lastCastUrl)
+                                    && !baseOf(u).equals(baseOf(lastCastUrl))) {
                                 stopAutoNextWait();
                                 CastSession s = castContext == null ? null
                                         : castContext.getSessionManager().getCurrentCastSession();
                                 if (s != null && s.isConnected()) {
                                     toast("自动连播:正在投下一集…");
-                                    loadMedia(s, u);
+                                    loadMedia(s, u, 0);
                                 }
                             }
                         }
@@ -189,6 +223,7 @@ public class MainActivity extends AppCompatActivity {
                 urlBar.setText(url);
                 // 换了页面,旧直链多半已失效或不属于本页:重置,免得一键把上一部投出去。
                 detectedUrl = null;
+                detectedPriority = 0;
                 castBtn.setEnabled(false);
                 if (!awaitingNext) {
                     status.setText("加载中…登录并播放视频后,这里会提示可投屏");
@@ -201,7 +236,11 @@ public class MainActivity extends AppCompatActivity {
         });
         urlBar.setOnEditorActionListener(new TextView.OnEditorActionListener() {
             @Override public boolean onEditorAction(TextView v, int actionId, android.view.KeyEvent event) {
-                load();
+                // 软键盘「前往」只回调一次;物理回车按下/抬起各回调一次,只认按下,免得加载两遍。
+                if (actionId == EditorInfo.IME_ACTION_GO
+                        || (event != null && event.getAction() == android.view.KeyEvent.ACTION_DOWN)) {
+                    load();
+                }
                 return true;
             }
         });
@@ -314,7 +353,7 @@ public class MainActivity extends AppCompatActivity {
             }
         };
         mediaCallback = new RemoteMediaClient.Callback() {
-            @Override public void onStatusUpdated() { refreshControls(); maybeAutoNext(); }
+            @Override public void onStatusUpdated() { refreshControls(); notifyIfPlaybackError(); maybeAutoNext(); }
             @Override public void onMetadataUpdated() { refreshControls(); }
         };
     }
@@ -355,6 +394,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         detectedUrl = null;
+        detectedPriority = 0;
         castBtn.setEnabled(false);
         status.setText("加载中…登录并播放视频后,这里会提示可投屏");
         web.loadUrl(u);
@@ -375,13 +415,30 @@ public class MainActivity extends AppCompatActivity {
             toast("投屏组件不可用(缺 Google Play 服务)");
             return;
         }
+        // 先读网页里正片已播到的位置(异步),电视上从这个位置接着放,不用从头看。
+        final String t = target;
+        web.evaluateJavascript("(function(){" + jsCollectMedia("video") + JS_PICK_LONGEST
+                        + "if(!_v||!isFinite(_v.duration)||_v.duration<=1)return 0;"
+                        + "return Math.floor(_v.currentTime||0);})();",
+                new ValueCallback<String>() {
+                    @Override public void onReceiveValue(String value) {
+                        long posMs = 0;
+                        try { posMs = (long) (Double.parseDouble(value) * 1000.0); } catch (Exception ignored) {}
+                        startCast(t, posMs);
+                    }
+                });
+    }
+
+    private void startCast(String target, long positionMs) {
         CastSession session = castContext.getSessionManager().getCurrentCastSession();
         if (session != null && session.isConnected()) {
-            loadMedia(session, target);
+            loadMedia(session, target, positionMs);
             return;
         }
         // 还没连接电视:记下要投的地址,弹出「选择电视」对话框;选好后 sessionListener 会自动开投。
         pendingUrl = target;
+        pendingPosMs = positionMs;
+        pendingSetAt = SystemClock.elapsedRealtime();
         toast("请选择要投屏的电视…");
         routeButton.performClick();
     }
@@ -391,10 +448,12 @@ public class MainActivity extends AppCompatActivity {
         if (pendingUrl == null) return;
         String target = pendingUrl;
         pendingUrl = null;
-        loadMedia(session, target);
+        // 记下太久(比如上次弹框被取消、这次是手动连的电视)就作废,免得误投旧片。
+        if (SystemClock.elapsedRealtime() - pendingSetAt > 120000) return;
+        loadMedia(session, target, pendingPosMs);
     }
 
-    private void loadMedia(CastSession session, String target) {
+    private void loadMedia(CastSession session, String target, long positionMs) {
         RemoteMediaClient client = session.getRemoteMediaClient();
         if (client == null) {
             toast("投屏会话异常,请重连电视");
@@ -418,11 +477,19 @@ public class MainActivity extends AppCompatActivity {
                 .setMetadata(meta)
                 .build();
 
-        MediaLoadRequestData req = new MediaLoadRequestData.Builder()
-                .setMediaInfo(info)
-                .build();
+        MediaLoadRequestData.Builder reqBuilder = new MediaLoadRequestData.Builder()
+                .setMediaInfo(info);
+        if (positionMs > 5000) reqBuilder.setCurrentTime(positionMs); // 本地已看几分钟就从那里接着放
 
-        client.load(req);
+        playErrorToasted = false;
+        client.load(reqBuilder.build()).setResultCallback(
+                new ResultCallback<RemoteMediaClient.MediaChannelResult>() {
+                    @Override public void onResult(RemoteMediaClient.MediaChannelResult r) {
+                        if (!r.getStatus().isSuccess()) {
+                            toast("投屏请求没成功(" + r.getStatus().getStatusCode() + "),请重试");
+                        }
+                    }
+                });
         lastCastUrl = target;
         stopAutoNextWait();
         pauseLocalPlayback();
@@ -438,6 +505,18 @@ public class MainActivity extends AppCompatActivity {
         if (awaitingNext || lastCastUrl == null) return;
         if (remoteClient.getPlayerState() != MediaStatus.PLAYER_STATE_IDLE
                 || remoteClient.getIdleReason() != MediaStatus.IDLE_REASON_FINISHED) return;
+        // 有些站会提前预取下一集:嗅探记录里已有不同于当前集的正片直链,直接投,不用等。
+        String preloaded = detectedUrl;
+        if (preloaded != null && priorityOf(preloaded) >= priorityOf(lastCastUrl)
+                && !baseOf(preloaded).equals(baseOf(lastCastUrl))) {
+            CastSession s = castContext == null ? null
+                    : castContext.getSessionManager().getCurrentCastSession();
+            if (s != null && s.isConnected()) {
+                toast("自动连播:正在投下一集…");
+                loadMedia(s, preloaded, 0);
+                return;
+            }
+        }
         awaitingNext = true;
         toast("这一集放完了,尝试自动接下一集…");
         web.evaluateJavascript("(function(){" + jsCollectMedia("video") + JS_PICK_LONGEST
@@ -453,6 +532,32 @@ public class MainActivity extends AppCompatActivity {
         awaitingNext = false;
         uiHandler.removeCallbacks(nextTimeout);
         uiHandler.removeCallbacks(nextFallback);
+    }
+
+    // 电视端拉流失败(常见原因:直链带防盗链、HLS/DASH 缺 CORS 头)时提示一次,给出替代方案。
+    private void notifyIfPlaybackError() {
+        if (remoteClient == null || playErrorToasted) return;
+        if (remoteClient.getPlayerState() == MediaStatus.PLAYER_STATE_IDLE
+                && remoteClient.getIdleReason() == MediaStatus.IDLE_REASON_ERROR) {
+            playErrorToasted = true;
+            toast("电视拉流失败:该站直链可能有防盗链/跨域限制,建议改用电脑 Chrome 的「投放标签页」");
+        }
+    }
+
+    // 直链优先级:m3u8/mpd(正片播放列表)=2,mp4 等单文件=1,非直链=0。
+    private static int priorityOf(String u) {
+        if (u == null) return 0;
+        Matcher m = STREAM.matcher(u);
+        if (!m.find()) return 0;
+        String ext = m.group(1).toLowerCase(Locale.US);
+        return ("m3u8".equals(ext) || "mpd".equals(ext)) ? 2 : 1;
+    }
+
+    // 只放行 http(s) 的页面导航。
+    private static boolean isHttp(String u) {
+        if (u == null) return false;
+        String s = u.toLowerCase(Locale.US);
+        return s.startsWith("http://") || s.startsWith("https://");
     }
 
     private static String baseOf(String u) {
@@ -499,7 +604,13 @@ public class MainActivity extends AppCompatActivity {
             session = castContext.getSessionManager().getCurrentCastSession();
             if (session != null) client = session.getRemoteMediaClient();
         }
-        castSession = session;
+        if (session != castSession) {
+            if (castSession != null) {
+                try { castSession.removeCastListener(castListener); } catch (Exception ignored) {}
+            }
+            if (session != null) session.addCastListener(castListener);
+            castSession = session;
+        }
         if (client == remoteClient) { refreshControls(); return; }
         if (remoteClient != null) {
             remoteClient.unregisterCallback(mediaCallback);
@@ -518,6 +629,9 @@ public class MainActivity extends AppCompatActivity {
             remoteClient.unregisterCallback(mediaCallback);
             remoteClient.removeProgressListener(progressListener);
             remoteClient = null;
+        }
+        if (castSession != null) {
+            try { castSession.removeCastListener(castListener); } catch (Exception ignored) {}
         }
         castSession = null;
         stopAutoNextWait();
@@ -562,8 +676,8 @@ public class MainActivity extends AppCompatActivity {
         @Override public void onSessionStartFailed(CastSession session, int error) { pendingUrl = null; }
         @Override public void onSessionStarting(CastSession session) {}
         @Override public void onSessionEnding(CastSession session) {}
-        @Override public void onSessionEnded(CastSession session, int error) { unbindMediaClient(); remoteClient = null; refreshControls(); }
-        @Override public void onSessionSuspended(CastSession session, int reason) { unbindMediaClient(); remoteClient = null; refreshControls(); }
+        @Override public void onSessionEnded(CastSession session, int error) { unbindMediaClient(); refreshControls(); }
+        @Override public void onSessionSuspended(CastSession session, int reason) { unbindMediaClient(); refreshControls(); }
         @Override public void onSessionResuming(CastSession session, String sessionId) {}
         @Override public void onSessionResumeFailed(CastSession session, int error) {}
     }
@@ -593,9 +707,11 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onPause() {
-        // 投屏中保持 WebView 运行:自动连播要靠它在后台加载下一集;
-        // 没在投屏就暂停页面里的计时器和播放,免得后台白放耗电。
-        if (web != null && remoteClient == null) web.onPause();
+        // 电视真在放(或正等着接下一集)时保持 WebView 运行:自动连播靠它在后台加载下一集;
+        // 其余情况(没投、已停止、连着电视但没投片)暂停页面计时器和播放,免得后台白放耗电。
+        boolean casting = remoteClient != null && remoteClient.hasMediaSession()
+                && remoteClient.getPlayerState() != MediaStatus.PLAYER_STATE_IDLE;
+        if (web != null && !casting && !awaitingNext) web.onPause();
         super.onPause();
     }
 
@@ -606,6 +722,12 @@ public class MainActivity extends AppCompatActivity {
         }
         unbindMediaClient();
         uiHandler.removeCallbacksAndMessages(null);
+        if (web != null) {
+            ViewGroup parent = (ViewGroup) web.getParent();
+            if (parent != null) parent.removeView(web);
+            web.destroy();
+            web = null;
+        }
         super.onDestroy();
     }
 

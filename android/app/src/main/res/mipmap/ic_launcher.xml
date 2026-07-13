@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- API 21–25 的启动图标(26+ 用 mipmap-anydpi-v26 里的自适应图标) -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/ic_launcher_background"/>
+            <corners android:radius="14dp"/>
+        </shape>
+    </item>
+    <item android:drawable="@drawable/ic_launcher_foreground"/>
+</layer-list>
