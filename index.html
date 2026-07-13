@@ -137,15 +137,15 @@
   <h2>方法二(画质最好):抓视频直链,让电视自己播放</h2>
   <p>电视直接从源站拉流,不经过你的电脑镜像,清晰度和流畅度都是原生的。步骤:</p>
   <ol>
-    <li>把这个按钮拖到 Chrome 的书签栏(按 <code>Ctrl/⌘ + Shift + B</code> 显示书签栏):<br><br>
+    <li>把这个按钮拖到 Chrome 的书签栏(按 <code>Ctrl/⌘ + Shift + B</code> 显示书签栏)——<strong>只需一次</strong>:<br><br>
       <a id="bmLink" class="bm" href="#">🎯 抓视频直链</a>
     </li>
     <li>打开你的会员网站,让视频<strong>先播放几秒</strong>;</li>
-    <li>点一下书签栏里的「🎯 抓视频直链」——找到的地址会自动复制;</li>
-    <li>回到本页,粘贴到下面,点「投到电视」。</li>
+    <li>点一下书签栏里的「🎯 抓视频直链」——它会<strong>自动打开本工具、把直链填好</strong>,不用手动复制粘贴;</li>
+    <li>在弹出的工具页点「📺 投到电视」即可。</li>
   </ol>
   <div class="row">
-    <input id="urlInput" class="grow" type="url" placeholder="粘贴视频直链,如 https://…/xxx.m3u8 或 …/xxx.mp4" autocomplete="off" spellcheck="false">
+    <input id="urlInput" class="grow" type="url" placeholder="视频直链(点书签会自动填入,也可手动粘贴),如 …/xxx.m3u8" autocomplete="off" spellcheck="false">
   </div>
   <div class="row">
     <input id="titleInput" class="grow" type="text" placeholder="标题(可选,显示在电视上)" autocomplete="off">
@@ -250,6 +250,7 @@
 
 <script type="text/plain" id="bm-src">
 (function () {
+  var TOOL = '__TOOL_URL__';
   var found = [];
   var seen = {};
   function push(s) {
@@ -280,9 +281,10 @@
     return;
   }
   var best = found[0];
-  try { navigator.clipboard.writeText(best); } catch (e) {}
-  window.prompt('找到 ' + found.length + ' 个地址, 最优的一个已复制到剪贴板(也可在此手动复制):', best);
-  if (window.console) console.log('[抓流结果]\n' + found.slice(0, 10).join('\n'));
+  var url = TOOL + '#u=' + encodeURIComponent(best) +
+    '&t=' + encodeURIComponent((document.title || '').slice(0, 120));
+  var w = window.open(url, '_blank');
+  if (!w) location.href = url;
 })();
 </script>
 
@@ -604,7 +606,8 @@
 
   // ---------- 书签工具 ----------
   (function setupBookmarklet() {
-    var src = $('bm-src').textContent;
+    var toolUrl = location.origin + location.pathname;
+    var src = $('bm-src').textContent.replace('__TOOL_URL__', toolUrl);
     var href = 'javascript:' + encodeURIComponent(src);
     var link = $('bmLink');
     link.setAttribute('href', href);
@@ -624,10 +627,33 @@
     });
   })();
 
-  try {
-    var last = localStorage.getItem('castHelperLastUrl');
-    if (last) $('urlInput').value = last;
-  } catch (e) {}
+  // 书签抓到直链后会带着 #u=…&t=… 打开本页,自动填好,无需手动复制粘贴
+  function applyIncoming() {
+    var h = location.hash ? location.hash.slice(1) : '';
+    if (!h) return false;
+    var got = {}, parts = h.split('&');
+    for (var i = 0; i < parts.length; i++) {
+      var kv = parts[i], idx = kv.indexOf('=');
+      if (idx < 0) continue;
+      got[kv.slice(0, idx)] = decodeURIComponent(kv.slice(idx + 1).replace(/\+/g, ' '));
+    }
+    if (!got.u) return false;
+    $('urlInput').value = got.u;
+    if (got.t) $('titleInput').value = got.t;
+    try { localStorage.setItem('castHelperLastUrl', got.u); } catch (e) {}
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+    return true;
+  }
+
+  if (applyIncoming()) {
+    toast('已带入视频直链 ✅ 点「📺 投到电视」即可', 6000);
+    try { $('btnCast').focus(); $('btnCast').scrollIntoView({ block: 'center' }); } catch (e) {}
+  } else {
+    try {
+      var last = localStorage.getItem('castHelperLastUrl');
+      if (last) $('urlInput').value = last;
+    } catch (e) {}
+  }
 })();
 </script>
 <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"
