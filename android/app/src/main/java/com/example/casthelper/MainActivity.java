@@ -506,27 +506,24 @@ public class MainActivity extends AppCompatActivity {
             toast("投屏组件不可用(缺 Google Play 服务)");
             return;
         }
-        // 一次性异步读:正片进度(续播用)、选中集“第N集”(补标题)、以及当前 <video> 自己
-        // 暴露的直链。优先用后者当投屏目标,把目标绑定到“正在放的这个视频”,避免投成页面
-        // 后台预取的下一集(嗅探是 last-wins,可能被预取的 m3u8 覆盖)。
+        // 只读:选中集“第N集”(补标题)、当前 <video> 直链(仅在完全没嗅到直链时兜底)。
+        // 投屏目标 = 嗅探到的直链(网页当前在放的那条),且不做续播 seek——与最早不卡的
+        // 版本保持一致(续播 seek、改用 currentSrc 都是后来加的,先撤掉排查卡顿)。
         web.evaluateJavascript(jsProbeActive(),
                 new ValueCallback<String>() {
                     @Override public void onReceiveValue(String value) {
-                        long posMs = 0;
                         String ep = "", src = "";
                         try {
                             org.json.JSONArray a = new org.json.JSONArray(value);
-                            posMs = (long) (a.getDouble(0) * 1000.0);
                             ep = a.optString(1, "");
                             src = a.optString(2, "");
                         } catch (Exception ignored) {}
-                        String target = null;
-                        if (!TextUtils.isEmpty(src) && STREAM.matcher(src).find()) target = src;
-                        if (target == null) target = detectedUrl; // blob/MSE 拿不到时退回嗅探直链
+                        String target = detectedUrl;
                         if (target == null) {
                             String bar = urlBar.getText().toString().trim();
                             if (STREAM.matcher(bar).find()) target = bar;
                         }
+                        if (target == null && !TextUtils.isEmpty(src) && STREAM.matcher(src).find()) target = src;
                         if (target == null) {
                             web.evaluateJavascript(jsProbeMedia(), new ValueCallback<String>() {
                                 @Override public void onReceiveValue(String v) {
@@ -538,7 +535,7 @@ public class MainActivity extends AppCompatActivity {
                             return;
                         }
                         episodeHint = ep;
-                        startCast(target, posMs);
+                        startCast(target, 0); // 不做续播 seek,从头播(老行为)
                     }
                 });
     }
