@@ -79,6 +79,13 @@
   #toast.show { opacity: .95; }
   .fine { font-size: 13px; color: var(--muted); }
   code { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 13px; }
+  .sites { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+  .sitelink {
+    display: inline-block; padding: 7px 15px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+    text-decoration: none; font-size: 15px;
+  }
+  .sitelink:hover { border-color: var(--accent); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -96,6 +103,20 @@
 </header>
 
 <main>
+
+<section>
+  <h2>常用视频网站(先打开,再用下面两种方法投屏)</h2>
+  <p class="fine">在电脑或安卓的 Chrome / Edge 里点开你要看的网站(会在新标签页打开),登录并播放后,再用下面的「投放标签页」或「🎯 抓视频直链」书签。只投放你自己有权观看的内容。</p>
+  <div class="sites">
+    <a class="sitelink" href="https://www.bilibili.com" target="_blank" rel="noopener">哔哩哔哩</a>
+    <a class="sitelink" href="https://www.mgtv.com" target="_blank" rel="noopener">芒果TV</a>
+    <a class="sitelink" href="https://www.youku.com" target="_blank" rel="noopener">优酷</a>
+    <a class="sitelink" href="https://v.qq.com" target="_blank" rel="noopener">腾讯视频</a>
+    <a class="sitelink" href="https://www.iqiyi.com" target="_blank" rel="noopener">爱奇艺</a>
+    <a class="sitelink" href="https://www.ixigua.com" target="_blank" rel="noopener">西瓜视频</a>
+    <a class="sitelink" href="https://www.youtube.com" target="_blank" rel="noopener">YouTube</a>
+  </div>
+</section>
 
 <section>
   <h2>方法一(最简单,先试这个):Chrome 直接"投放标签页"</h2>

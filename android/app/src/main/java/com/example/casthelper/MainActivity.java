@@ -14,6 +14,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -36,6 +37,18 @@ public class MainActivity extends AppCompatActivity {
     // Full playlists / files worth casting (ignore individual HLS segments like .ts/.m4s).
     private static final Pattern STREAM =
             Pattern.compile("\\.(m3u8|mpd|mp4|m4v|mov|webm)([?#]|$)", Pattern.CASE_INSENSITIVE);
+
+    // Quick-launch shortcuts for common video sites: {显示名称, 网址}. Prefer mobile pages
+    // where they exist so they render well in the WebView.
+    private static final String[][] SITES = {
+            {"哔哩哔哩", "https://m.bilibili.com"},
+            {"芒果TV", "https://www.mgtv.com"},
+            {"优酷", "https://www.youku.com"},
+            {"腾讯视频", "https://v.qq.com"},
+            {"爱奇艺", "https://www.iqiyi.com"},
+            {"西瓜视频", "https://www.ixigua.com"},
+            {"YouTube", "https://m.youtube.com"},
+    };
 
     private WebView web;
     private EditText urlBar;
@@ -115,7 +128,34 @@ public class MainActivity extends AppCompatActivity {
         });
         castBtn.setEnabled(false);
 
+        setupShortcuts();
+
         web.loadUrl("https://www.google.com");
+    }
+
+    private void setupShortcuts() {
+        LinearLayout bar = findViewById(R.id.shortcuts);
+        int gap = Math.round(4 * getResources().getDisplayMetrics().density);
+        for (final String[] site : SITES) {
+            Button b = new Button(this);
+            b.setText(site[0]);
+            b.setAllCaps(false);
+            b.setMinWidth(0);
+            b.setMinimumWidth(0);
+            b.setPadding(gap * 3, gap, gap * 3, gap);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(gap, gap, gap, gap);
+            b.setLayoutParams(lp);
+            b.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    urlBar.setText(site[1]);
+                    load();
+                }
+            });
+            bar.addView(b);
+        }
     }
 
     private void load() {
