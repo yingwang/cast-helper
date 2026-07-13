@@ -26,6 +26,16 @@ android {
     }
 }
 
+// Align all kotlin-stdlib variants so the legacy jdk7/jdk8 split artifacts
+// (pulled in transitively) don't duplicate classes already in kotlin-stdlib 1.8+.
+configurations.all {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.10'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.10'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.10'
+    }
+}
+
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.mediarouter:mediarouter:1.6.0'
