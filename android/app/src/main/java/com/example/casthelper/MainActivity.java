@@ -103,6 +103,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean userVolDragging = false;
     private CastSession castSession;
     private boolean playErrorToasted = false; // 每次投出后,拉流失败只提示一次
+    private volatile boolean errorAwaitingVariant = false; // master 投失败、正等固定分支出现好自动换线
     // 电视遥控器/其他手机改了 Chromecast 音量时,同步刷新音量条。
     private final Cast.Listener castListener = new Cast.Listener() {
         @Override public void onVolumeChanged() { refreshControls(); }
@@ -159,6 +160,17 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
             });
+        }
+    };
+    // master 投失败后等固定分支出现的兜底:12 秒还没等到就给终态提示。
+    private final Runnable errorGiveUp = new Runnable() {
+        @Override public void run() {
+            if (!errorAwaitingVariant) return;
+            errorAwaitingVariant = false;
+            if (!playErrorToasted) {
+                playErrorToasted = true;
+                toast("电视拉流失败:该站直链可能有防盗链/跨域限制,建议改用电脑 Chrome 的「投放标签页」");
+            }
         }
     };
 
@@ -224,8 +236,19 @@ public class MainActivity extends AppCompatActivity {
                     // mp4 之间维持「后到的赢」(贴片广告在前、正片在后)。低级别不覆盖高级别。
                     final boolean better = pri > detectedPriority
                             || (pri == detectedPriority && (pri == 1 || preferVariant));
-                    if (better) { detectedUrl = u; detectedPriority = pri; }
-                    else if (pri == 2 && detectedPriority == 2) altStreamUrl = u; // 记下备用固定分支
+                    if (better) { detectedUrl = u; detectedPriority = pri; if (pri == 2) altStreamUrl = null; }
+                    else if (pri == 2 && detectedPriority == 2 && altStreamUrl == null) altStreamUrl = u; // 只记 master 之后第一条固定分支当备用
+                    // 之前投 master 失败、正等固定分支出现的话,拿到就自动换线重试
+                    if (altStreamUrl != null && errorAwaitingVariant) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                if (!errorAwaitingVariant) return;
+                                errorAwaitingVariant = false;
+                                uiHandler.removeCallbacks(errorGiveUp);
+                                tryVariantFallback("电视拉流失败,自动换固定码率线路重试…");
+                            }
+                        });
+                    }
                     if (!better && !awaitingNext) return null;
                     runOnUiThread(new Runnable() {
                         @Override
@@ -334,7 +357,8 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnStop).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (remoteClient == null) return;
-                syncBackToPage(); // 停止前把电视看到的进度写回网页播放器,回手机能接着看
+                setLocalPauseGuard(false); // 先解除守卫,回手机能正常播放
+                syncBackToPage(); // 把电视看到的进度写回网页播放器,回手机能接着看
                 remoteClient.stop();
             }
         });
@@ -570,6 +594,8 @@ public class MainActivity extends AppCompatActivity {
         bufferedAccumMs = 0;
         bufferSpells = 0;
         fallbackTried = false;
+        errorAwaitingVariant = false;
+        uiHandler.removeCallbacks(errorGiveUp);
         // 先把本地按停(并挂上“保持暂停”守卫),再发投放请求——顺序反过来的话,
         // 万一发送环节抛异常,本地就会一直白放。
         pauseLocalPlayback();
@@ -577,6 +603,7 @@ public class MainActivity extends AppCompatActivity {
                 new ResultCallback<RemoteMediaClient.MediaChannelResult>() {
                     @Override public void onResult(RemoteMediaClient.MediaChannelResult r) {
                         if (!r.getStatus().isSuccess()) {
+                            setLocalPauseGuard(false); // 投放被拒:解除守卫,别把本地播放也一起锁死
                             toast("投屏请求没成功(" + r.getStatus().getStatusCode() + "),请重试");
                         }
                     }
@@ -651,6 +678,14 @@ public class MainActivity extends AppCompatActivity {
             // 先试自动换线:部分站的 master 总表里分支是相对路径、token 只在网页选中的
             // 那条分支上,电视按 master 去拿会被拒;换回固定分支往往就能播。
             if (tryVariantFallback("电视拉流失败,自动换固定码率线路重试…")) return;
+            if (errorAwaitingVariant) return; // 已在等固定分支出现,别重复提示
+            // master 失败但固定分支可能还没被网页请求到:先等一会儿,拿到再自动换线,
+            // 12 秒没等到才给终态提示(见 errorGiveUp 与 shouldInterceptRequest 的重试)。
+            if (!preferVariant && !fallbackTried && altStreamUrl == null) {
+                errorAwaitingVariant = true;
+                uiHandler.postDelayed(errorGiveUp, 12000);
+                return;
+            }
             playErrorToasted = true;
             toast("电视拉流失败:该站直链可能有防盗链/跨域限制,建议改用电脑 Chrome 的「投放标签页」");
         }
@@ -667,6 +702,10 @@ public class MainActivity extends AppCompatActivity {
         preferVariant = true; // 这次运行里之后的集数直接用固定分支,不再拿 master 试错
         toast(why);
         loadMedia(s, target, Math.max(0, lastTvPosMs));
+        // 换线后把“当前直链”指向固定分支,别让失败的 master 之后被误当成预取的下一集投出
+        detectedUrl = target;
+        detectedPriority = priorityOf(target);
+        altStreamUrl = null;
         return true;
     }
 
@@ -723,8 +762,7 @@ public class MainActivity extends AppCompatActivity {
         if (web == null || lastTvPosMs <= 0 || lastTvDurMs <= 0) return;
         double pos = lastTvPosMs / 1000.0;
         double dur = lastTvDurMs / 1000.0;
-        web.evaluateJavascript(jsSetPauseGuard(false) // 不投了,解除守卫,把进度还给网页
-                + "(function(){" + jsCollectMedia("video") + JS_PICK_LONGEST
+        web.evaluateJavascript("(function(){" + jsCollectMedia("video") + JS_PICK_LONGEST
                 + "if(!_v||!isFinite(_v.duration))return;"
                 + "if(Math.abs(_v.duration-" + dur + ")>5)return;"
                 + "try{_v.currentTime=" + pos + ";}catch(e){}})();", null);
@@ -746,6 +784,11 @@ public class MainActivity extends AppCompatActivity {
     private static final String JS_PICK_LONGEST =
             "var _v=null,_d=-1;for(var i=0;i<_vs.length;i++){var x=_vs[i],"
                     + "dd=isFinite(x.duration)?x.duration:0;if(dd>_d){_d=dd;_v=x;}}";
+
+    // 打开/关闭“保持暂停”守卫(Java 侧薄封装,供停止投屏 / 投放被拒 / 会话结束等路径调用)。
+    private void setLocalPauseGuard(boolean on) {
+        if (web != null) web.evaluateJavascript(jsSetPauseGuard(on), null);
+    }
 
     // 投屏成功后,把 App 内网页里正在放的音视频暂停并静音(含同源 iframe),并挂上
     // “保持暂停”守卫:不少站的播放器过几秒会自己恢复播放,单次暂停压不住,守卫监听
@@ -837,7 +880,9 @@ public class MainActivity extends AppCompatActivity {
         }
         castSession = null;
         stopAutoNextWait();
-        if (web != null) web.evaluateJavascript(jsSetPauseGuard(false), null); // 会话没了,解除本地暂停守卫
+        errorAwaitingVariant = false;
+        uiHandler.removeCallbacks(errorGiveUp);
+        setLocalPauseGuard(false); // 会话没了,解除本地暂停守卫
     }
 
     private void refreshControls() {
