@@ -77,6 +77,7 @@ public class MainActivity extends AppCompatActivity {
     private MediaRouteButton routeButton;
     private volatile String detectedUrl = null;
     private volatile int detectedPriority = 0; // m3u8/mpd=2,mp4 等=1:防止贴片广告盖掉正片
+    private volatile String altStreamUrl = null; // 被“master 优先”压下的最近一条固定码率分支,备用
     private String lastPageUrl = null; // 当前页面地址(忽略 #),检测 SPA 站内换集用
     // 用户点了「投屏到电视」但还没连接电视时,先把要投的地址记在这里,选好电视后自动投。
     private String pendingUrl = null;
@@ -102,6 +103,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean userVolDragging = false;
     private CastSession castSession;
     private boolean playErrorToasted = false; // 每次投出后,拉流失败只提示一次
+    private volatile boolean errorAwaitingVariant = false; // master 投失败、正等固定分支出现好自动换线
     // 电视遥控器/其他手机改了 Chromecast 音量时,同步刷新音量条。
     private final Cast.Listener castListener = new Cast.Listener() {
         @Override public void onVolumeChanged() { refreshControls(); }
@@ -115,6 +117,15 @@ public class MainActivity extends AppCompatActivity {
     // 电视端最近的播放位置/时长(随进度监听每 3 秒更新),停止投屏时回写给网页播放器。
     private long lastTvPosMs = 0;
     private long lastTvDurMs = 0;
+    // master 总表在部分站会拉不动(分支相对路径丢 token)或反复缓冲:盯着开播后的
+    // 播放状态,出问题就自动切回网页选中的固定码率分支。
+    private boolean preferVariant = false; // 本次运行里 master 失败过,之后直接用固定分支
+    private boolean fallbackTried = false; // 本次投放已切换过,防循环
+    private long castStartAt = 0;
+    private boolean playbackStarted = false;
+    private long bufferingSince = 0;
+    private long bufferedAccumMs = 0;
+    private int bufferSpells = 0;
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final Runnable nextTimeout = new Runnable() {
         @Override public void run() {
@@ -149,6 +160,17 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
             });
+        }
+    };
+    // master 投失败后等固定分支出现的兜底:12 秒还没等到就给终态提示。
+    private final Runnable errorGiveUp = new Runnable() {
+        @Override public void run() {
+            if (!errorAwaitingVariant) return;
+            errorAwaitingVariant = false;
+            if (!playErrorToasted) {
+                playErrorToasted = true;
+                toast("电视拉流失败:该站直链可能有防盗链/跨域限制,建议改用电脑 Chrome 的「投放标签页」");
+            }
         }
     };
 
@@ -209,11 +231,24 @@ public class MainActivity extends AppCompatActivity {
                     final boolean dup = u.equals(detectedUrl);
                     if (dup && !awaitingNext) return null;
                     // 取舍规则:m3u8/mpd 之间「先到的赢」——播放器总是先取 master 总表,
-                    // 投 master 电视才能按网速自动升降画质;固定码率分支是后到的,不许覆盖。
+                    // 投 master 电视才能按网速自动升降画质;固定码率分支是后到的,不许覆盖
+                    //(若本次运行里 master 已失败过,则改回「后到的赢」,直接用固定分支)。
                     // mp4 之间维持「后到的赢」(贴片广告在前、正片在后)。低级别不覆盖高级别。
                     final boolean better = pri > detectedPriority
-                            || (pri == 1 && detectedPriority == 1);
-                    if (better) { detectedUrl = u; detectedPriority = pri; }
+                            || (pri == detectedPriority && (pri == 1 || preferVariant));
+                    if (better) { detectedUrl = u; detectedPriority = pri; if (pri == 2) altStreamUrl = null; }
+                    else if (pri == 2 && detectedPriority == 2 && altStreamUrl == null) altStreamUrl = u; // 只记 master 之后第一条固定分支当备用
+                    // 之前投 master 失败、正等固定分支出现的话,拿到就自动换线重试
+                    if (altStreamUrl != null && errorAwaitingVariant) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                if (!errorAwaitingVariant) return;
+                                errorAwaitingVariant = false;
+                                uiHandler.removeCallbacks(errorGiveUp);
+                                tryVariantFallback("电视拉流失败,自动换固定码率线路重试…");
+                            }
+                        });
+                    }
                     if (!better && !awaitingNext) return null;
                     runOnUiThread(new Runnable() {
                         @Override
@@ -248,6 +283,7 @@ public class MainActivity extends AppCompatActivity {
                 // 换了页面,旧直链多半已失效或不属于本页:重置,免得一键把上一部投出去。
                 detectedUrl = null;
                 detectedPriority = 0;
+                altStreamUrl = null;
                 castBtn.setEnabled(false);
                 if (!awaitingNext) {
                     status.setText("加载中…登录并播放视频后,这里会提示可投屏");
@@ -269,6 +305,7 @@ public class MainActivity extends AppCompatActivity {
                     lastPageUrl = url;
                     detectedUrl = null;
                     detectedPriority = 0;
+                    altStreamUrl = null;
                     castBtn.setEnabled(false);
                 }
             }
@@ -320,7 +357,8 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnStop).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (remoteClient == null) return;
-                syncBackToPage(); // 停止前把电视看到的进度写回网页播放器,回手机能接着看
+                setLocalPauseGuard(false); // 先解除守卫,回手机能正常播放
+                syncBackToPage(); // 把电视看到的进度写回网页播放器,回手机能接着看
                 remoteClient.stop();
             }
         });
@@ -392,6 +430,7 @@ public class MainActivity extends AppCompatActivity {
         progressListener = new RemoteMediaClient.ProgressListener() {
             @Override public void onProgressUpdated(long progressMs, long durationMs) {
                 if (durationMs > 0) { lastTvPosMs = progressMs; lastTvDurMs = durationMs; }
+                trackBufferingAndMaybeFallback(); // 每 3 秒一跳,卡在缓冲时也有心跳做判断
                 if (userSeeking) return;
                 if (durationMs > 0) {
                     seek.setEnabled(true);
@@ -405,7 +444,12 @@ public class MainActivity extends AppCompatActivity {
             }
         };
         mediaCallback = new RemoteMediaClient.Callback() {
-            @Override public void onStatusUpdated() { refreshControls(); notifyIfPlaybackError(); maybeAutoNext(); }
+            @Override public void onStatusUpdated() {
+                refreshControls();
+                trackBufferingAndMaybeFallback();
+                notifyIfPlaybackError();
+                maybeAutoNext();
+            }
             @Override public void onMetadataUpdated() { refreshControls(); }
         };
     }
@@ -447,6 +491,7 @@ public class MainActivity extends AppCompatActivity {
         }
         detectedUrl = null;
         detectedPriority = 0;
+        altStreamUrl = null;
         castBtn.setEnabled(false);
         status.setText("加载中…登录并播放视频后,这里会提示可投屏");
         web.loadUrl(u);
@@ -543,17 +588,28 @@ public class MainActivity extends AppCompatActivity {
         playErrorToasted = false;
         lastTvPosMs = 0;
         lastTvDurMs = 0;
+        castStartAt = SystemClock.elapsedRealtime();
+        playbackStarted = false;
+        bufferingSince = 0;
+        bufferedAccumMs = 0;
+        bufferSpells = 0;
+        fallbackTried = false;
+        errorAwaitingVariant = false;
+        uiHandler.removeCallbacks(errorGiveUp);
+        // 先把本地按停(并挂上“保持暂停”守卫),再发投放请求——顺序反过来的话,
+        // 万一发送环节抛异常,本地就会一直白放。
+        pauseLocalPlayback();
         client.load(reqBuilder.build()).setResultCallback(
                 new ResultCallback<RemoteMediaClient.MediaChannelResult>() {
                     @Override public void onResult(RemoteMediaClient.MediaChannelResult r) {
                         if (!r.getStatus().isSuccess()) {
+                            setLocalPauseGuard(false); // 投放被拒:解除守卫,别把本地播放也一起锁死
                             toast("投屏请求没成功(" + r.getStatus().getStatusCode() + "),请重试");
                         }
                     }
                 });
         lastCastUrl = target;
         stopAutoNextWait();
-        pauseLocalPlayback();
         bindMediaClient();
         toast("已投到电视 ✅ " + title);
     }
@@ -598,7 +654,8 @@ public class MainActivity extends AppCompatActivity {
     // 让网页播放器跳到片尾正常播完,触发网站自带连播;接不上时的兜底与超时见
     // nextFallback / nextTimeout。
     private void triggerPageNext(long fallbackDelayMs, long timeoutMs) {
-        web.evaluateJavascript("(function(){" + jsCollectMedia("video") + JS_PICK_LONGEST
+        web.evaluateJavascript(jsSetPauseGuard(false) // 要让页面播到片尾,先解除暂停守卫
+                + "(function(){" + jsCollectMedia("video") + JS_PICK_LONGEST
                 + "if(!_v)return;_v.muted=true;"
                 + "if(isFinite(_v.duration)&&_v.duration>1){try{_v.currentTime=Math.max(0,_v.duration-0.6);}catch(e){}}"
                 + "try{_v.play();}catch(e){}})();", null);
@@ -618,8 +675,57 @@ public class MainActivity extends AppCompatActivity {
         if (remoteClient == null || playErrorToasted) return;
         if (remoteClient.getPlayerState() == MediaStatus.PLAYER_STATE_IDLE
                 && remoteClient.getIdleReason() == MediaStatus.IDLE_REASON_ERROR) {
+            // 先试自动换线:部分站的 master 总表里分支是相对路径、token 只在网页选中的
+            // 那条分支上,电视按 master 去拿会被拒;换回固定分支往往就能播。
+            if (tryVariantFallback("电视拉流失败,自动换固定码率线路重试…")) return;
+            if (errorAwaitingVariant) return; // 已在等固定分支出现,别重复提示
+            // master 失败但固定分支可能还没被网页请求到:先等一会儿,拿到再自动换线,
+            // 12 秒没等到才给终态提示(见 errorGiveUp 与 shouldInterceptRequest 的重试)。
+            if (!preferVariant && !fallbackTried && altStreamUrl == null) {
+                errorAwaitingVariant = true;
+                uiHandler.postDelayed(errorGiveUp, 12000);
+                return;
+            }
             playErrorToasted = true;
             toast("电视拉流失败:该站直链可能有防盗链/跨域限制,建议改用电脑 Chrome 的「投放标签页」");
+        }
+    }
+
+    // 把备用的固定码率分支投出去(从电视当前位置续播);没有备用或已试过则返回 false。
+    private boolean tryVariantFallback(String why) {
+        String target = altStreamUrl;
+        if (fallbackTried || preferVariant || target == null || target.equals(lastCastUrl)) return false;
+        CastSession s = castContext == null ? null
+                : castContext.getSessionManager().getCurrentCastSession();
+        if (s == null || !s.isConnected()) return false;
+        fallbackTried = true;
+        preferVariant = true; // 这次运行里之后的集数直接用固定分支,不再拿 master 试错
+        toast(why);
+        loadMedia(s, target, Math.max(0, lastTvPosMs));
+        // 换线后把“当前直链”指向固定分支,别让失败的 master 之后被误当成预取的下一集投出
+        detectedUrl = target;
+        detectedPriority = priorityOf(target);
+        altStreamUrl = null;
+        return true;
+    }
+
+    // 开播后头 2 分半盯着缓冲情况:开播即卡、反复缓冲、或一次卡太久,就自动切固定码率线路。
+    private void trackBufferingAndMaybeFallback() {
+        if (remoteClient == null || castStartAt == 0) return;
+        long now = SystemClock.elapsedRealtime();
+        int ps = remoteClient.getPlayerState();
+        if (ps == MediaStatus.PLAYER_STATE_PLAYING) {
+            playbackStarted = true;
+            if (bufferingSince > 0) { bufferedAccumMs += now - bufferingSince; bufferingSince = 0; }
+        } else if (ps == MediaStatus.PLAYER_STATE_BUFFERING && playbackStarted) {
+            if (bufferingSince == 0) { bufferingSince = now; bufferSpells++; }
+        }
+        if (preferVariant || now - castStartAt > 150000) return;
+        long stuckMs = bufferingSince > 0 ? now - bufferingSince : 0;
+        boolean neverStarted = !playbackStarted && now - castStartAt > 25000
+                && (ps == MediaStatus.PLAYER_STATE_BUFFERING || ps == MediaStatus.PLAYER_STATE_LOADING);
+        if (neverStarted || bufferedAccumMs + stuckMs > 15000 || bufferSpells >= 4 || stuckMs > 10000) {
+            tryVariantFallback("缓冲频繁,自动切到固定码率线路…");
         }
     }
 
@@ -679,21 +785,58 @@ public class MainActivity extends AppCompatActivity {
             "var _v=null,_d=-1;for(var i=0;i<_vs.length;i++){var x=_vs[i],"
                     + "dd=isFinite(x.duration)?x.duration:0;if(dd>_d){_d=dd;_v=x;}}";
 
-    // 投屏成功后,把 App 内网页里正在放的音视频暂停并静音(含同源 iframe),
-    // 省得 Boox 本地白播、费电。
+    // 打开/关闭“保持暂停”守卫(Java 侧薄封装,供停止投屏 / 投放被拒 / 会话结束等路径调用)。
+    private void setLocalPauseGuard(boolean on) {
+        if (web != null) web.evaluateJavascript(jsSetPauseGuard(on), null);
+    }
+
+    // 投屏成功后,把 App 内网页里正在放的音视频暂停并静音(含同源 iframe),并挂上
+    // “保持暂停”守卫:不少站的播放器过几秒会自己恢复播放,单次暂停压不住,守卫监听
+    // play 事件立刻再按停。守卫在停止投屏 / 触发连播时解除。
     private void pauseLocalPlayback() {
         if (web == null) return;
         web.evaluateJavascript("(function(){" + jsCollectMedia("video,audio")
-                + "for(var i=0;i<_vs.length;i++){try{_vs[i].pause();_vs[i].muted=true;}catch(e){}}})();", null);
+                + "for(var i=0;i<_vs.length;i++){try{_vs[i].pause();_vs[i].muted=true;}catch(e){}}})();"
+                + jsSetPauseGuard(true), null);
     }
 
-    // 投屏标题:用当前网页标题(一般含剧名和集数),截掉常见的“_站名”“ - 站名”后缀。
+    // 打开/关闭“保持暂停”守卫(含同源 iframe):每个文档只装一次 play 捕获监听,
+    // 用 _chGuard 开关控制;play 事件不冒泡但会经过捕获阶段,document 上能截到。
+    private static String jsSetPauseGuard(boolean on) {
+        return "(function _g(w){try{w._chGuard=" + (on ? "1" : "0") + ";"
+                + "if(!w._chGuardInit){w._chGuardInit=1;"
+                + "w.document.addEventListener('play',function(ev){"
+                + "if(w._chGuard){try{ev.target.pause();ev.target.muted=true;}catch(e){}}"
+                + "},true);}}catch(e){}"
+                + "try{for(var j=0;j<w.frames.length;j++)_g(w.frames[j]);}catch(e){}})(window);";
+    }
+
+    private static final Pattern EPISODE = Pattern.compile(
+            "第\\s*[0-9一二三四五六七八九十百零]+\\s*[集话話期]|[Ee][Pp]?\\s*\\d{1,4}|\\d{1,3}\\s*[集话話期]");
+
+    // 投屏标题:用当前网页标题,截掉“_站名”“ - 站名”后缀;不少站把集数放在第二段
+    //(如「剧名_第3集_站名」),被截掉的话找回来拼上,电视上才看得到第几集。
     private String castTitle() {
         String t = web == null ? null : web.getTitle();
         if (t != null) t = t.trim();
         if (TextUtils.isEmpty(t) || t.startsWith("http")) return "投屏";
-        String first = t.split("\\s*[_|]\\s*|\\s+[-–—]\\s+")[0].trim();
-        if (first.length() >= 2) t = first;
+        String[] parts = t.split("\\s*[_|]\\s*|\\s+[-–—]\\s+");
+        String first = parts[0].trim();
+        if (first.length() >= 2) {
+            StringBuilder sb = new StringBuilder(first);
+            if (!EPISODE.matcher(first).find()) {
+                for (int i = 1; i < parts.length; i++) {
+                    String p = parts[i].replaceAll("(在线观看|免费观看|高清|完整版|无删减).*$", "").trim();
+                    // “全30集 / 更新至10集 / 共24集”是总集数,不是当前集数,跳过
+                    if (p.isEmpty() || p.contains("全") || p.contains("更新") || p.contains("共")) continue;
+                    if (p.length() <= 20 && EPISODE.matcher(p).find()) {
+                        sb.append(' ').append(p);
+                        break;
+                    }
+                }
+            }
+            t = sb.toString();
+        }
         if (t.length() > 60) t = t.substring(0, 60) + "…";
         return t;
     }
@@ -737,6 +880,9 @@ public class MainActivity extends AppCompatActivity {
         }
         castSession = null;
         stopAutoNextWait();
+        errorAwaitingVariant = false;
+        uiHandler.removeCallbacks(errorGiveUp);
+        setLocalPauseGuard(false); // 会话没了,解除本地暂停守卫
     }
 
     private void refreshControls() {
