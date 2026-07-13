@@ -502,40 +502,43 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void cast() {
-        String target = detectedUrl;
-        if (target == null) {
-            String bar = urlBar.getText().toString().trim();
-            if (STREAM.matcher(bar).find()) target = bar;
-        }
-        if (target == null) {
-            // 没嗅到直链:探测一下是不是 blob/加密流,给出对症提示。
-            web.evaluateJavascript(jsProbeMedia(), new ValueCallback<String>() {
-                @Override public void onReceiveValue(String v) {
-                    toast("2".equals(v)
-                            ? "此站是加密/内存流(blob),抓不到直链;请用电脑 Chrome 的「投放标签页」"
-                            : "还没发现视频:先让视频播放几秒再点");
-                }
-            });
-            return;
-        }
         if (castContext == null) {
             toast("投屏组件不可用(缺 Google Play 服务)");
             return;
         }
-        // 先异步读网页里正片的当前进度 + 选中集的“第N集”文案:进度用于续播,集数补进标题。
-        final String t = target;
-        web.evaluateJavascript(jsProbePosAndEp(),
+        // 一次性异步读:正片进度(续播用)、选中集“第N集”(补标题)、以及当前 <video> 自己
+        // 暴露的直链。优先用后者当投屏目标,把目标绑定到“正在放的这个视频”,避免投成页面
+        // 后台预取的下一集(嗅探是 last-wins,可能被预取的 m3u8 覆盖)。
+        web.evaluateJavascript(jsProbeActive(),
                 new ValueCallback<String>() {
                     @Override public void onReceiveValue(String value) {
                         long posMs = 0;
-                        String ep = "";
+                        String ep = "", src = "";
                         try {
                             org.json.JSONArray a = new org.json.JSONArray(value);
                             posMs = (long) (a.getDouble(0) * 1000.0);
                             ep = a.optString(1, "");
+                            src = a.optString(2, "");
                         } catch (Exception ignored) {}
+                        String target = null;
+                        if (!TextUtils.isEmpty(src) && STREAM.matcher(src).find()) target = src;
+                        if (target == null) target = detectedUrl; // blob/MSE 拿不到时退回嗅探直链
+                        if (target == null) {
+                            String bar = urlBar.getText().toString().trim();
+                            if (STREAM.matcher(bar).find()) target = bar;
+                        }
+                        if (target == null) {
+                            web.evaluateJavascript(jsProbeMedia(), new ValueCallback<String>() {
+                                @Override public void onReceiveValue(String v) {
+                                    toast("2".equals(v)
+                                            ? "此站是加密/内存流(blob),抓不到直链;请用电脑 Chrome 的「投放标签页」"
+                                            : "还没发现视频:先让视频播放几秒再点");
+                                }
+                            });
+                            return;
+                        }
                         episodeHint = ep;
-                        startCast(t, posMs);
+                        startCast(target, posMs);
                     }
                 });
     }
@@ -849,10 +852,11 @@ public class MainActivity extends AppCompatActivity {
         return out;
     }
 
-    // 采集正片当前进度(秒)+ 页面里“选中集”的第N集文案,返回 JSON 数组 [pos, ep]。
+    // 采集当前正片:进度(秒)+ 页面“选中集”的第N集文案 + 该 <video> 自己暴露的 http(s) 直链。
     // 集数从带 active/current/playing/selected/on 等类名、且文本很短又形如“第N集”的元素里取,
-    // 尽量避免误抓到导航等无关元素。
-    private static String jsProbePosAndEp() {
+    // 尽量避免误抓到导航等无关元素;直链取 currentSrc(blob/MSE 则为空,回退到嗅探直链)。
+    // 返回 JSON 数组 [pos, ep, src]。
+    private static String jsProbeActive() {
         return "(function(){" + jsCollectMedia("video") + JS_PICK_LONGEST
                 + "var pos=(_v&&isFinite(_v.duration)&&_v.duration>1)?Math.floor(_v.currentTime||0):0;"
                 + "var ep='';try{var ds=[document];(function gd(w){try{for(var j=0;j<w.frames.length;j++){"
@@ -862,7 +866,9 @@ public class MainActivity extends AppCompatActivity {
                 + "for(var di=0;di<ds.length&&!ep;di++){var els=ds[di].querySelectorAll(sel);"
                 + "for(var i=0;i<els.length;i++){var tx=(els[i].textContent||'').replace(/\\s+/g,'');"
                 + "if(tx.length<=10){var m=tx.match(re);if(m){ep=m[0];break;}}}}"
-                + "}catch(e){}return [pos,ep];})();";
+                + "}catch(e){}"
+                + "var src='';try{if(_v){var ss=(_v.currentSrc||_v.src||'');if(/^https?:/i.test(ss))src=ss;}}catch(e){}"
+                + "return [pos,ep,src];})();";
     }
 
     // 把遥控条挂到当前会话的 RemoteMediaClient 上(注册状态回调与进度监听)。
