@@ -123,6 +123,29 @@
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:layout_marginStart="4dp"/>
         </LinearLayout>
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:textSize="13sp" android:text="音量"/>
+            <SeekBar android:id="@+id/volSeek"
+                android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:max="100"
+                android:layout_marginStart="4dp"/>
+            <Button android:id="@+id/btnMute"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="🔇 静音"/>
+        </LinearLayout>
+
+        <CheckBox android:id="@+id/chkAutoNext"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:textSize="13sp" android:checked="true"
+            android:text="自动连播(实验):一集放完自动接下一集,依赖网站自带连播"/>
     </LinearLayout>
 
     <WebView
