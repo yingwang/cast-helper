@@ -75,6 +75,11 @@
         android:paddingBottom="4dp"
         android:visibility="gone">
 
+        <TextView android:id="@+id/tvStatus"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:textSize="13sp" android:paddingTop="2dp"
+            android:text="📺 播放中"/>
+
         <LinearLayout
             android:orientation="horizontal"
             android:layout_width="match_parent"
@@ -89,6 +94,9 @@
             <Button android:id="@+id/btnFwd"
                 android:layout_width="0dp" android:layout_height="wrap_content"
                 android:layout_weight="1" android:text="⏩ +30s"/>
+            <Button android:id="@+id/btnNext"
+                android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:text="⏭ 下一集"/>
             <Button android:id="@+id/btnStop"
                 android:layout_width="0dp" android:layout_height="wrap_content"
                 android:layout_weight="1" android:text="⏹ 停止"/>
