@@ -28,6 +28,7 @@ import com.google.android.gms.cast.MediaMetadata;
 import com.google.android.gms.cast.framework.CastButtonFactory;
 import com.google.android.gms.cast.framework.CastContext;
 import com.google.android.gms.cast.framework.CastSession;
+import com.google.android.gms.cast.framework.SessionManagerListener;
 import com.google.android.gms.cast.framework.media.RemoteMediaClient;
 
 import java.util.regex.Pattern;
@@ -56,8 +57,12 @@ public class MainActivity extends AppCompatActivity {
     private EditText urlBar;
     private TextView status;
     private Button castBtn;
+    private MediaRouteButton routeButton;
     private volatile String detectedUrl = null;
+    // 用户点了「投屏到电视」但还没连接电视时,先把要投的地址记在这里,选好电视后自动投。
+    private String pendingUrl = null;
     private CastContext castContext;
+    private SessionManagerListener<CastSession> sessionListener;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -69,11 +74,12 @@ public class MainActivity extends AppCompatActivity {
         status = findViewById(R.id.status);
         castBtn = findViewById(R.id.castBtn);
         web = findViewById(R.id.web);
-        MediaRouteButton routeButton = findViewById(R.id.routeButton);
+        routeButton = findViewById(R.id.routeButton);
 
         try {
             castContext = CastContext.getSharedInstance(getApplicationContext());
             CastButtonFactory.setUpMediaRouteButton(getApplicationContext(), routeButton);
+            sessionListener = new CastSessionListener();
         } catch (Exception e) {
             status.setText("投屏组件不可用:请确认设备装了 Google Play 服务");
         }
@@ -192,10 +198,25 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
         CastSession session = castContext.getSessionManager().getCurrentCastSession();
-        if (session == null || !session.isConnected()) {
-            toast("先点右上角的投屏图标连接电视");
+        if (session != null && session.isConnected()) {
+            loadMedia(session, target);
             return;
         }
+        // 还没连接电视:记下要投的地址,弹出「选择电视」对话框;选好后 sessionListener 会自动开投。
+        pendingUrl = target;
+        toast("请选择要投屏的电视…");
+        routeButton.performClick();
+    }
+
+    // 选好电视、会话就绪后,把之前记下的地址自动投出去。
+    private void castPending(CastSession session) {
+        if (pendingUrl == null) return;
+        String target = pendingUrl;
+        pendingUrl = null;
+        loadMedia(session, target);
+    }
+
+    private void loadMedia(CastSession session, String target) {
         RemoteMediaClient client = session.getRemoteMediaClient();
         if (client == null) {
             toast("投屏会话异常,请重连电视");
@@ -225,6 +246,19 @@ public class MainActivity extends AppCompatActivity {
         toast("已发送到电视 ✅");
     }
 
+    // 连接/恢复电视会话后自动投出待投地址;其余回调无需处理。
+    private class CastSessionListener implements SessionManagerListener<CastSession> {
+        @Override public void onSessionStarted(CastSession session, String sessionId) { castPending(session); }
+        @Override public void onSessionResumed(CastSession session, boolean wasSuspended) { castPending(session); }
+        @Override public void onSessionStartFailed(CastSession session, int error) { pendingUrl = null; }
+        @Override public void onSessionStarting(CastSession session) {}
+        @Override public void onSessionEnding(CastSession session) {}
+        @Override public void onSessionEnded(CastSession session, int error) {}
+        @Override public void onSessionSuspended(CastSession session, int reason) {}
+        @Override public void onSessionResuming(CastSession session, String sessionId) {}
+        @Override public void onSessionResumeFailed(CastSession session, int error) {}
+    }
+
     private String shorten(String u) {
         return u.length() > 64 ? u.substring(0, 64) + "…" : u;
     }
@@ -239,6 +273,22 @@ public class MainActivity extends AppCompatActivity {
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
             if (imm != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
         }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (castContext != null && sessionListener != null) {
+            castContext.getSessionManager().addSessionManagerListener(sessionListener, CastSession.class);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        if (castContext != null && sessionListener != null) {
+            castContext.getSessionManager().removeSessionManagerListener(sessionListener, CastSession.class);
+        }
+        super.onPause();
     }
 
     @Override
