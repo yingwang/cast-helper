@@ -16,8 +16,8 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:hint="输入视频网站地址"
-            android:inputType="textUri"
+            android:hint="输入网址,或中文搜索"
+            android:inputType="text"
             android:imeOptions="actionGo"
             android:maxLines="1"/>
 
@@ -63,6 +63,67 @@
         android:layout_height="wrap_content"
         android:layout_margin="8dp"
         android:text="📺 投屏到电视"/>
+
+    <!-- 投屏后的遥控条:电视在放,这里只发指令。默认隐藏,有媒体在投时才显示。 -->
+    <LinearLayout
+        android:id="@+id/controls"
+        android:orientation="vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="4dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <Button android:id="@+id/btnPlayPause"
+                android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:text="⏸ 暂停"/>
+            <Button android:id="@+id/btnBack"
+                android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:text="⏪ -10s"/>
+            <Button android:id="@+id/btnFwd"
+                android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:text="⏩ +30s"/>
+            <Button android:id="@+id/btnStop"
+                android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1" android:text="⏹ 停止"/>
+        </LinearLayout>
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical">
+
+            <SeekBar android:id="@+id/seek"
+                android:layout_width="0dp" android:layout_height="wrap_content"
+                android:layout_weight="1"/>
+            <TextView android:id="@+id/timeLabel"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:textSize="13sp" android:text="0:00 / 0:00"/>
+        </LinearLayout>
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:textSize="13sp" android:text="倍速"/>
+            <LinearLayout android:id="@+id/speedRow"
+                android:orientation="horizontal"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"/>
+        </LinearLayout>
+    </LinearLayout>
 
     <WebView
         android:id="@+id/web"

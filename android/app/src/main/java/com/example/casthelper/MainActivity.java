@@ -15,6 +15,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -25,12 +26,14 @@ import androidx.mediarouter.app.MediaRouteButton;
 import com.google.android.gms.cast.MediaInfo;
 import com.google.android.gms.cast.MediaLoadRequestData;
 import com.google.android.gms.cast.MediaMetadata;
+import com.google.android.gms.cast.MediaSeekOptions;
 import com.google.android.gms.cast.framework.CastButtonFactory;
 import com.google.android.gms.cast.framework.CastContext;
 import com.google.android.gms.cast.framework.CastSession;
 import com.google.android.gms.cast.framework.SessionManagerListener;
 import com.google.android.gms.cast.framework.media.RemoteMediaClient;
 
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
@@ -53,6 +56,9 @@ public class MainActivity extends AppCompatActivity {
             {"欧乐影院", "https://www.olevod.com/"},
     };
 
+    // 倍速档位(Chromecast 默认接收器支持 0.5–2 倍)。
+    private static final double[] SPEEDS = {0.5, 1.0, 1.25, 1.5, 2.0};
+
     private WebView web;
     private EditText urlBar;
     private TextView status;
@@ -63,6 +69,16 @@ public class MainActivity extends AppCompatActivity {
     private String pendingUrl = null;
     private CastContext castContext;
     private SessionManagerListener<CastSession> sessionListener;
+
+    // 投屏后的遥控条
+    private LinearLayout controls;
+    private Button btnPlayPause;
+    private SeekBar seek;
+    private TextView timeLabel;
+    private boolean userSeeking = false;
+    private RemoteMediaClient remoteClient;
+    private RemoteMediaClient.Callback mediaCallback;
+    private RemoteMediaClient.ProgressListener progressListener;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -137,8 +153,83 @@ public class MainActivity extends AppCompatActivity {
         castBtn.setEnabled(false);
 
         setupShortcuts();
+        setupControls();
 
         web.loadUrl("https://www.google.com");
+    }
+
+    private void setupControls() {
+        controls = findViewById(R.id.controls);
+        btnPlayPause = findViewById(R.id.btnPlayPause);
+        seek = findViewById(R.id.seek);
+        timeLabel = findViewById(R.id.timeLabel);
+
+        btnPlayPause.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { if (remoteClient != null) remoteClient.togglePlayback(); }
+        });
+        findViewById(R.id.btnBack).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { seekBy(-10000); }
+        });
+        findViewById(R.id.btnFwd).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { seekBy(30000); }
+        });
+        findViewById(R.id.btnStop).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { if (remoteClient != null) remoteClient.stop(); }
+        });
+
+        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
+                if (fromUser) timeLabel.setText(fmt(progress) + " / " + fmt(sb.getMax()));
+            }
+            @Override public void onStartTrackingTouch(SeekBar sb) { userSeeking = true; }
+            @Override public void onStopTrackingTouch(SeekBar sb) {
+                userSeeking = false;
+                seekTo(sb.getProgress());
+            }
+        });
+
+        LinearLayout speedRow = findViewById(R.id.speedRow);
+        int gap = Math.round(4 * getResources().getDisplayMetrics().density);
+        for (final double rate : SPEEDS) {
+            Button b = new Button(this);
+            b.setText(rate == 1.0 ? "1x" : (rate + "x"));
+            b.setAllCaps(false);
+            b.setMinWidth(0);
+            b.setMinimumWidth(0);
+            b.setPadding(gap * 2, gap, gap * 2, gap);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(gap, 0, gap, 0);
+            b.setLayoutParams(lp);
+            b.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    if (remoteClient == null) return;
+                    remoteClient.setPlaybackRate(rate);
+                    toast("已设为 " + (rate == 1.0 ? "1" : String.valueOf(rate)) + " 倍速");
+                }
+            });
+            speedRow.addView(b);
+        }
+
+        // 每 3 秒更新一次进度,对墨水屏更友好(避免每秒刷新造成的闪烁/耗电)。
+        progressListener = new RemoteMediaClient.ProgressListener() {
+            @Override public void onProgressUpdated(long progressMs, long durationMs) {
+                if (userSeeking) return;
+                if (durationMs > 0) {
+                    seek.setEnabled(true);
+                    seek.setMax((int) durationMs);
+                    seek.setProgress((int) Math.min(progressMs, durationMs));
+                    timeLabel.setText(fmt(progressMs) + " / " + fmt(durationMs));
+                } else {
+                    seek.setEnabled(false);
+                    timeLabel.setText(fmt(progressMs) + " / 直播");
+                }
+            }
+        };
+        mediaCallback = new RemoteMediaClient.Callback() {
+            @Override public void onStatusUpdated() { refreshControls(); }
+            @Override public void onMetadataUpdated() { refreshControls(); }
+        };
     }
 
     private void setupShortcuts() {
@@ -243,18 +334,82 @@ public class MainActivity extends AppCompatActivity {
                 .build();
 
         client.load(req);
-        toast("已发送到电视 ✅");
+        pauseLocalPlayback();
+        bindMediaClient();
+        toast("已发送到电视 ✅ 下方可控制播放");
+    }
+
+    // 投屏成功后,把 App 内网页里正在放的视频暂停并静音,省得 Boox 本地白播、费电。
+    private void pauseLocalPlayback() {
+        if (web == null) return;
+        web.evaluateJavascript(
+                "(function(){try{var m=document.querySelectorAll('video,audio');" +
+                        "for(var i=0;i<m.length;i++){try{m[i].pause();m[i].muted=true;}catch(e){}}}catch(e){}})();",
+                null);
+    }
+
+    // 把遥控条挂到当前会话的 RemoteMediaClient 上(注册状态回调与进度监听)。
+    private void bindMediaClient() {
+        RemoteMediaClient client = null;
+        if (castContext != null) {
+            CastSession session = castContext.getSessionManager().getCurrentCastSession();
+            if (session != null) client = session.getRemoteMediaClient();
+        }
+        if (client == remoteClient) { refreshControls(); return; }
+        if (remoteClient != null) {
+            remoteClient.unregisterCallback(mediaCallback);
+            remoteClient.removeProgressListener(progressListener);
+        }
+        remoteClient = client;
+        if (remoteClient != null) {
+            remoteClient.registerCallback(mediaCallback);
+            remoteClient.addProgressListener(progressListener, 3000);
+        }
+        refreshControls();
+    }
+
+    private void unbindMediaClient() {
+        if (remoteClient != null) {
+            remoteClient.unregisterCallback(mediaCallback);
+            remoteClient.removeProgressListener(progressListener);
+            remoteClient = null;
+        }
+    }
+
+    private void refreshControls() {
+        if (controls == null) return;
+        boolean has = remoteClient != null && remoteClient.hasMediaSession();
+        controls.setVisibility(has ? View.VISIBLE : View.GONE);
+        if (has) btnPlayPause.setText(remoteClient.isPaused() ? "▶ 播放" : "⏸ 暂停");
+    }
+
+    private void seekTo(long ms) {
+        if (remoteClient == null) return;
+        remoteClient.seek(new MediaSeekOptions.Builder().setPosition(Math.max(0, ms)).build());
+    }
+
+    private void seekBy(long deltaMs) {
+        if (remoteClient == null) return;
+        seekTo(remoteClient.getApproximateStreamPosition() + deltaMs);
+    }
+
+    private String fmt(long ms) {
+        if (ms < 0) ms = 0;
+        long t = ms / 1000;
+        long h = t / 3600, m = (t % 3600) / 60, s = t % 60;
+        if (h > 0) return String.format(Locale.US, "%d:%02d:%02d", h, m, s);
+        return String.format(Locale.US, "%d:%02d", m, s);
     }
 
     // 连接/恢复电视会话后自动投出待投地址;其余回调无需处理。
     private class CastSessionListener implements SessionManagerListener<CastSession> {
-        @Override public void onSessionStarted(CastSession session, String sessionId) { castPending(session); }
-        @Override public void onSessionResumed(CastSession session, boolean wasSuspended) { castPending(session); }
+        @Override public void onSessionStarted(CastSession session, String sessionId) { castPending(session); bindMediaClient(); }
+        @Override public void onSessionResumed(CastSession session, boolean wasSuspended) { castPending(session); bindMediaClient(); }
         @Override public void onSessionStartFailed(CastSession session, int error) { pendingUrl = null; }
         @Override public void onSessionStarting(CastSession session) {}
         @Override public void onSessionEnding(CastSession session) {}
-        @Override public void onSessionEnded(CastSession session, int error) {}
-        @Override public void onSessionSuspended(CastSession session, int reason) {}
+        @Override public void onSessionEnded(CastSession session, int error) { unbindMediaClient(); remoteClient = null; refreshControls(); }
+        @Override public void onSessionSuspended(CastSession session, int reason) { unbindMediaClient(); remoteClient = null; refreshControls(); }
         @Override public void onSessionResuming(CastSession session, String sessionId) {}
         @Override public void onSessionResumeFailed(CastSession session, int error) {}
     }
@@ -281,10 +436,12 @@ public class MainActivity extends AppCompatActivity {
         if (castContext != null && sessionListener != null) {
             castContext.getSessionManager().addSessionManagerListener(sessionListener, CastSession.class);
         }
+        bindMediaClient();
     }
 
     @Override
     protected void onPause() {
+        unbindMediaClient();
         if (castContext != null && sessionListener != null) {
             castContext.getSessionManager().removeSessionManagerListener(sessionListener, CastSession.class);
         }
