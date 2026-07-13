@@ -4,6 +4,8 @@ import android.annotation.SuppressLint;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.view.View;
 import android.view.inputmethod.InputMethodManager;
@@ -13,6 +15,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
@@ -27,6 +30,7 @@ import com.google.android.gms.cast.MediaInfo;
 import com.google.android.gms.cast.MediaLoadRequestData;
 import com.google.android.gms.cast.MediaMetadata;
 import com.google.android.gms.cast.MediaSeekOptions;
+import com.google.android.gms.cast.MediaStatus;
 import com.google.android.gms.cast.framework.CastButtonFactory;
 import com.google.android.gms.cast.framework.CastContext;
 import com.google.android.gms.cast.framework.CastSession;
@@ -80,6 +84,27 @@ public class MainActivity extends AppCompatActivity {
     private RemoteMediaClient.Callback mediaCallback;
     private RemoteMediaClient.ProgressListener progressListener;
 
+    // 音量(调的是 Chromecast 输出电平,和电视遥控器的音量叠加生效)
+    private SeekBar volSeek;
+    private Button btnMute;
+    private boolean userVolDragging = false;
+    private CastSession castSession;
+
+    // 自动连播(实验):电视播完 → 让网页播放器跳到片尾触发网站自带连播
+    // → 嗅探到不同于当前集的新直链 → 自动投出。
+    private CheckBox chkAutoNext;
+    private String lastCastUrl = null;
+    private boolean awaitingNext = false;
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable nextTimeout = new Runnable() {
+        @Override public void run() {
+            if (awaitingNext) {
+                awaitingNext = false;
+                toast("没能自动接上下一集,请回 App 手动点下一集");
+            }
+        }
+    };
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -126,6 +151,17 @@ public class MainActivity extends AppCompatActivity {
                         public void run() {
                             castBtn.setEnabled(true);
                             status.setText("已发现视频,点下面「投屏到电视」\n" + shorten(u));
+                            // 自动连播:正等下一集时,嗅探到不同于当前集的新直链就自动投出。
+                            if (awaitingNext && !baseOf(u).equals(baseOf(lastCastUrl))) {
+                                awaitingNext = false;
+                                uiHandler.removeCallbacks(nextTimeout);
+                                CastSession s = castContext == null ? null
+                                        : castContext.getSessionManager().getCurrentCastSession();
+                                if (s != null && s.isConnected()) {
+                                    toast("自动连播:正在投下一集…");
+                                    loadMedia(s, u);
+                                }
+                            }
                         }
                     });
                 }
@@ -211,6 +247,35 @@ public class MainActivity extends AppCompatActivity {
             speedRow.addView(b);
         }
 
+        volSeek = findViewById(R.id.volSeek);
+        btnMute = findViewById(R.id.btnMute);
+        chkAutoNext = findViewById(R.id.chkAutoNext);
+
+        volSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {}
+            @Override public void onStartTrackingTouch(SeekBar sb) { userVolDragging = true; }
+            @Override public void onStopTrackingTouch(SeekBar sb) {
+                userVolDragging = false;
+                if (castSession == null) return;
+                try {
+                    castSession.setVolume(sb.getProgress() / 100.0);
+                } catch (Exception e) {
+                    toast("音量设置失败:" + e.getMessage());
+                }
+            }
+        });
+        btnMute.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (castSession == null) return;
+                try {
+                    castSession.setMute(!castSession.isMute());
+                    refreshControls();
+                } catch (Exception e) {
+                    toast("静音切换失败:" + e.getMessage());
+                }
+            }
+        });
+
         // 每 3 秒更新一次进度,对墨水屏更友好(避免每秒刷新造成的闪烁/耗电)。
         progressListener = new RemoteMediaClient.ProgressListener() {
             @Override public void onProgressUpdated(long progressMs, long durationMs) {
@@ -227,7 +292,7 @@ public class MainActivity extends AppCompatActivity {
             }
         };
         mediaCallback = new RemoteMediaClient.Callback() {
-            @Override public void onStatusUpdated() { refreshControls(); }
+            @Override public void onStatusUpdated() { refreshControls(); maybeAutoNext(); }
             @Override public void onMetadataUpdated() { refreshControls(); }
         };
     }
@@ -334,9 +399,34 @@ public class MainActivity extends AppCompatActivity {
                 .build();
 
         client.load(req);
+        lastCastUrl = target;
+        awaitingNext = false;
+        uiHandler.removeCallbacks(nextTimeout);
         pauseLocalPlayback();
         bindMediaClient();
         toast("已发送到电视 ✅ 下方可控制播放");
+    }
+
+    // 电视报告"播放正常结束"时,让网页播放器跳到片尾,触发网站自带的自动连播;
+    // 网站加载下一集后由嗅探回调接手自动投出。90 秒没等到就提示手动。
+    private void maybeAutoNext() {
+        if (remoteClient == null || chkAutoNext == null || !chkAutoNext.isChecked()) return;
+        if (awaitingNext || lastCastUrl == null) return;
+        if (remoteClient.getPlayerState() != MediaStatus.PLAYER_STATE_IDLE
+                || remoteClient.getIdleReason() != MediaStatus.IDLE_REASON_FINISHED) return;
+        awaitingNext = true;
+        toast("这一集放完了,尝试自动接下一集…");
+        web.evaluateJavascript(
+                "(function(){try{var v=document.querySelector('video');if(!v)return;" +
+                        "v.muted=true;" +
+                        "if(isFinite(v.duration)&&v.duration>1){v.currentTime=Math.max(0,v.duration-0.6);}" +
+                        "v.play();}catch(e){}})();",
+                null);
+        uiHandler.postDelayed(nextTimeout, 90000);
+    }
+
+    private static String baseOf(String u) {
+        return u == null ? "" : u.split("[?#]")[0];
     }
 
     // 投屏成功后,把 App 内网页里正在放的视频暂停并静音,省得 Boox 本地白播、费电。
@@ -351,10 +441,12 @@ public class MainActivity extends AppCompatActivity {
     // 把遥控条挂到当前会话的 RemoteMediaClient 上(注册状态回调与进度监听)。
     private void bindMediaClient() {
         RemoteMediaClient client = null;
+        CastSession session = null;
         if (castContext != null) {
-            CastSession session = castContext.getSessionManager().getCurrentCastSession();
+            session = castContext.getSessionManager().getCurrentCastSession();
             if (session != null) client = session.getRemoteMediaClient();
         }
+        castSession = session;
         if (client == remoteClient) { refreshControls(); return; }
         if (remoteClient != null) {
             remoteClient.unregisterCallback(mediaCallback);
@@ -374,13 +466,23 @@ public class MainActivity extends AppCompatActivity {
             remoteClient.removeProgressListener(progressListener);
             remoteClient = null;
         }
+        castSession = null;
+        awaitingNext = false;
+        uiHandler.removeCallbacks(nextTimeout);
     }
 
     private void refreshControls() {
         if (controls == null) return;
         boolean has = remoteClient != null && remoteClient.hasMediaSession();
         controls.setVisibility(has ? View.VISIBLE : View.GONE);
-        if (has) btnPlayPause.setText(remoteClient.isPaused() ? "▶ 播放" : "⏸ 暂停");
+        if (!has) return;
+        btnPlayPause.setText(remoteClient.isPaused() ? "▶ 播放" : "⏸ 暂停");
+        if (castSession != null) {
+            try {
+                if (!userVolDragging) volSeek.setProgress((int) Math.round(castSession.getVolume() * 100));
+                btnMute.setText(castSession.isMute() ? "🔊 取消静音" : "🔇 静音");
+            } catch (Exception ignored) {}
+        }
     }
 
     private void seekTo(long ms) {
