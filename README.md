@@ -1,8 +1,19 @@
 # 📺 电视投屏助手 Cast Helper
 
-把不带"投屏"按钮的网站视频,投到支持 Chromecast 的电视上。单文件纯静态网页,无后端、不收集任何数据。
+把不带"投屏"按钮的网站视频,投到支持 Chromecast 的电视上。提供两种形态:一个纯静态网页,和一个安卓 App。无后端、不收集任何数据。
 
-**在线使用:<https://yingwang.github.io/cast-helper/>**(需要电脑或安卓上的 Chrome / Edge)
+**在线网页:<https://yingwang.github.io/cast-helper/>**(需要电脑或安卓上的 Chrome / Edge)
+
+## 📱 安卓 App(推荐给 Boox / 安卓手机)
+
+App 内自带浏览器,自动嗅探视频、一键投屏,比网页版省事——**打开网站 → 登录播放 → 点「投屏到电视」**,不用弄书签、不用复制链接。
+
+- **下载安装包:<https://github.com/yingwang/cast-helper/releases/download/app-latest/cast-helper.apk>**
+- 安装:Boox 上用浏览器打开上面的链接下载,点开安装;若提示,请在「设置 → 安全」里允许该浏览器「安装未知来源应用」。
+- 前提:设备装有 Google Play 服务、和电视连同一 Wi-Fi。
+- ⚠️ 仅安卓可用;**iPhone / iPad 无法安装非 App Store 应用**,请用在线网页或 Web Video Caster 之类的现成 App。
+
+> 安装包由 GitHub Actions 自动编译发布([Build Android APK](../../actions/workflows/android.yml)),源码见 [`android/`](android/)。
 
 ## 用法
 
