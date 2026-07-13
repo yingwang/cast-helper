@@ -55,7 +55,7 @@
         android:layout_height="wrap_content"
         android:padding="8dp"
         android:textSize="13sp"
-        android:text="用法:上面输入你的视频网站 → 打开 → 登录并播放 → 出现提示后点「投屏到电视」。第一次先点右上角图标连接电视。"/>
+        android:text="用法:选或输入视频网站 → 登录并播放 → 出现提示后点下面「📺 投屏到电视」,按提示选一次电视就会自动投(设备与电视需连同一 Wi-Fi)。"/>
 
     <Button
         android:id="@+id/castBtn"
