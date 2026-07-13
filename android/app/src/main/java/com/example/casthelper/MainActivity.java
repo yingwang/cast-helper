@@ -79,6 +79,7 @@ public class MainActivity extends AppCompatActivity {
     private volatile int detectedPriority = 0; // m3u8/mpd=2,mp4 等=1:防止贴片广告盖掉正片
     private volatile String altStreamUrl = null; // 被“master 优先”压下的最近一条固定码率分支,备用
     private String lastPageUrl = null; // 当前页面地址(忽略 #),检测 SPA 站内换集用
+    private String episodeHint = "";   // 从页面选中集读到的“第N集”,标题不含集数时补上
     // 用户点了「投屏到电视」但还没连接电视时,先把要投的地址记在这里,选好电视后自动投。
     private String pendingUrl = null;
     private long pendingPosMs = 0;  // 记地址时本地已看到的进度
@@ -119,7 +120,9 @@ public class MainActivity extends AppCompatActivity {
     private long lastTvDurMs = 0;
     // master 总表在部分站会拉不动(分支相对路径丢 token)或反复缓冲:盯着开播后的
     // 播放状态,出问题就自动切回网页选中的固定码率分支。
-    private boolean preferVariant = false; // 本次运行里 master 失败过,之后直接用固定分支
+    // 默认投网页选中的固定码率线路(即“后到的赢”):master 自适应在真实站点上反而频繁
+    // 缓冲(总表里分支相对路径丢 token / 自适应用力过猛),所以不再默认投 master。
+    private boolean preferVariant = true;
     private boolean fallbackTried = false; // 本次投放已切换过,防循环
     private long castStartAt = 0;
     private boolean playbackStarted = false;
@@ -230,10 +233,9 @@ public class MainActivity extends AppCompatActivity {
                     // 下一集可能早被网站预取过一次,再请求时地址相同,也得进自动连播判断。
                     final boolean dup = u.equals(detectedUrl);
                     if (dup && !awaitingNext) return null;
-                    // 取舍规则:m3u8/mpd 之间「先到的赢」——播放器总是先取 master 总表,
-                    // 投 master 电视才能按网速自动升降画质;固定码率分支是后到的,不许覆盖
-                    //(若本次运行里 master 已失败过,则改回「后到的赢」,直接用固定分支)。
-                    // mp4 之间维持「后到的赢」(贴片广告在前、正片在后)。低级别不覆盖高级别。
+                    // 取舍规则:同级(m3u8 之间 / mp4 之间)「后到的赢」——网页播放器最后
+                    // 请求的那条就是它选中的固定码率线路 / 正片,投它电视最稳(preferVariant
+                    // 默认 true)。低级别(mp4)不覆盖高级别(m3u8)。
                     final boolean better = pri > detectedPriority
                             || (pri == detectedPriority && (pri == 1 || preferVariant));
                     if (better) { detectedUrl = u; detectedPriority = pri; if (pri == 2) altStreamUrl = null; }
@@ -266,6 +268,7 @@ public class MainActivity extends AppCompatActivity {
                                         : castContext.getSessionManager().getCurrentCastSession();
                                 if (s != null && s.isConnected()) {
                                     toast("自动连播:正在投下一集…");
+                                    episodeHint = ""; // 换集了,旧集数作废
                                     loadMedia(s, u, 0);
                                 }
                             }
@@ -499,36 +502,43 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void cast() {
-        String target = detectedUrl;
-        if (target == null) {
-            String bar = urlBar.getText().toString().trim();
-            if (STREAM.matcher(bar).find()) target = bar;
-        }
-        if (target == null) {
-            // 没嗅到直链:探测一下是不是 blob/加密流,给出对症提示。
-            web.evaluateJavascript(jsProbeMedia(), new ValueCallback<String>() {
-                @Override public void onReceiveValue(String v) {
-                    toast("2".equals(v)
-                            ? "此站是加密/内存流(blob),抓不到直链;请用电脑 Chrome 的「投放标签页」"
-                            : "还没发现视频:先让视频播放几秒再点");
-                }
-            });
-            return;
-        }
         if (castContext == null) {
             toast("投屏组件不可用(缺 Google Play 服务)");
             return;
         }
-        // 先读网页里正片已播到的位置(异步),电视上从这个位置接着放,不用从头看。
-        final String t = target;
-        web.evaluateJavascript("(function(){" + jsCollectMedia("video") + JS_PICK_LONGEST
-                        + "if(!_v||!isFinite(_v.duration)||_v.duration<=1)return 0;"
-                        + "return Math.floor(_v.currentTime||0);})();",
+        // 一次性异步读:正片进度(续播用)、选中集“第N集”(补标题)、以及当前 <video> 自己
+        // 暴露的直链。优先用后者当投屏目标,把目标绑定到“正在放的这个视频”,避免投成页面
+        // 后台预取的下一集(嗅探是 last-wins,可能被预取的 m3u8 覆盖)。
+        web.evaluateJavascript(jsProbeActive(),
                 new ValueCallback<String>() {
                     @Override public void onReceiveValue(String value) {
                         long posMs = 0;
-                        try { posMs = (long) (Double.parseDouble(value) * 1000.0); } catch (Exception ignored) {}
-                        startCast(t, posMs);
+                        String ep = "", src = "";
+                        try {
+                            org.json.JSONArray a = new org.json.JSONArray(value);
+                            posMs = (long) (a.getDouble(0) * 1000.0);
+                            ep = a.optString(1, "");
+                            src = a.optString(2, "");
+                        } catch (Exception ignored) {}
+                        String target = null;
+                        if (!TextUtils.isEmpty(src) && STREAM.matcher(src).find()) target = src;
+                        if (target == null) target = detectedUrl; // blob/MSE 拿不到时退回嗅探直链
+                        if (target == null) {
+                            String bar = urlBar.getText().toString().trim();
+                            if (STREAM.matcher(bar).find()) target = bar;
+                        }
+                        if (target == null) {
+                            web.evaluateJavascript(jsProbeMedia(), new ValueCallback<String>() {
+                                @Override public void onReceiveValue(String v) {
+                                    toast("2".equals(v)
+                                            ? "此站是加密/内存流(blob),抓不到直链;请用电脑 Chrome 的「投放标签页」"
+                                            : "还没发现视频:先让视频播放几秒再点");
+                                }
+                            });
+                            return;
+                        }
+                        episodeHint = ep;
+                        startCast(target, posMs);
                     }
                 });
     }
@@ -647,6 +657,7 @@ public class MainActivity extends AppCompatActivity {
                 : castContext.getSessionManager().getCurrentCastSession();
         if (s == null || !s.isConnected()) return false;
         toast("自动连播:正在投下一集…");
+        episodeHint = ""; // 换集了,旧集数作废,交给新页面标题
         loadMedia(s, preloaded, 0);
         return true;
     }
@@ -814,31 +825,50 @@ public class MainActivity extends AppCompatActivity {
     private static final Pattern EPISODE = Pattern.compile(
             "第\\s*[0-9一二三四五六七八九十百零]+\\s*[集话話期]|[Ee][Pp]?\\s*\\d{1,4}|\\d{1,3}\\s*[集话話期]");
 
-    // 投屏标题:用当前网页标题,截掉“_站名”“ - 站名”后缀;不少站把集数放在第二段
-    //(如「剧名_第3集_站名」),被截掉的话找回来拼上,电视上才看得到第几集。
+    // 投屏标题:用当前网页标题,截掉“站名/在线观看”等后缀,尽量留下剧名 + 集数。
+    // 分隔符含无空格连字符(爱壹帆「剧名-免费在线观看-爱壹帆」)、下划线、竖线、破折号。
+    // 标题里没有集数时,用从页面选中集读到的 episodeHint 补上。
     private String castTitle() {
         String t = web == null ? null : web.getTitle();
         if (t != null) t = t.trim();
         if (TextUtils.isEmpty(t) || t.startsWith("http")) return "投屏";
-        String[] parts = t.split("\\s*[_|]\\s*|\\s+[-–—]\\s+");
-        String first = parts[0].trim();
-        if (first.length() >= 2) {
-            StringBuilder sb = new StringBuilder(first);
-            if (!EPISODE.matcher(first).find()) {
-                for (int i = 1; i < parts.length; i++) {
-                    String p = parts[i].replaceAll("(在线观看|免费观看|高清|完整版|无删减).*$", "").trim();
-                    // “全30集 / 更新至10集 / 共24集”是总集数,不是当前集数,跳过
-                    if (p.isEmpty() || p.contains("全") || p.contains("更新") || p.contains("共")) continue;
-                    if (p.length() <= 20 && EPISODE.matcher(p).find()) {
-                        sb.append(' ').append(p);
-                        break;
-                    }
-                }
+        String[] parts = t.split("\\s*[_|·]\\s*|\\s*[-–—]\\s*");
+        String out = parts[0].trim();
+        if (out.length() < 2) out = t; // 首段太短(没按预期分隔),退回整串
+        if (!EPISODE.matcher(out).find()) {
+            String ep = null;
+            for (int i = 1; i < parts.length; i++) {
+                String p = parts[i].replaceAll("(在线观看|免费观看|高清|完整版|无删减).*$", "").trim();
+                // “全30集 / 更新至10集 / 共24集”是总集数,不是当前集数,跳过
+                if (p.isEmpty() || p.contains("全") || p.contains("更新") || p.contains("共")) continue;
+                if (p.length() <= 20 && EPISODE.matcher(p).find()) { ep = p; break; }
             }
-            t = sb.toString();
+            if (ep == null && !TextUtils.isEmpty(episodeHint) && EPISODE.matcher(episodeHint).find()) {
+                ep = episodeHint; // 标题不含集数(如爱壹帆),用页面里读到的选中集
+            }
+            if (ep != null) out = out + " " + ep;
         }
-        if (t.length() > 60) t = t.substring(0, 60) + "…";
-        return t;
+        if (out.length() > 60) out = out.substring(0, 60) + "…";
+        return out;
+    }
+
+    // 采集当前正片:进度(秒)+ 页面“选中集”的第N集文案 + 该 <video> 自己暴露的 http(s) 直链。
+    // 集数从带 active/current/playing/selected/on 等类名、且文本很短又形如“第N集”的元素里取,
+    // 尽量避免误抓到导航等无关元素;直链取 currentSrc(blob/MSE 则为空,回退到嗅探直链)。
+    // 返回 JSON 数组 [pos, ep, src]。
+    private static String jsProbeActive() {
+        return "(function(){" + jsCollectMedia("video") + JS_PICK_LONGEST
+                + "var pos=(_v&&isFinite(_v.duration)&&_v.duration>1)?Math.floor(_v.currentTime||0):0;"
+                + "var ep='';try{var ds=[document];(function gd(w){try{for(var j=0;j<w.frames.length;j++){"
+                + "var fw=w.frames[j],d=fw.document;if(d){ds.push(d);gd(fw);}}}catch(e){}})(window);"
+                + "var re=/第\\s*[0-9一二三四五六七八九十百零]+\\s*[集话話期]|[Ee][Pp]\\s*\\d{1,4}/;"
+                + "var sel='[class*=\"active\"],[class*=\"cur\"],[class*=\"playing\"],[class*=\"selected\"],.on,.act';"
+                + "for(var di=0;di<ds.length&&!ep;di++){var els=ds[di].querySelectorAll(sel);"
+                + "for(var i=0;i<els.length;i++){var tx=(els[i].textContent||'').replace(/\\s+/g,'');"
+                + "if(tx.length<=10){var m=tx.match(re);if(m){ep=m[0];break;}}}}"
+                + "}catch(e){}"
+                + "var src='';try{if(_v){var ss=(_v.currentSrc||_v.src||'');if(/^https?:/i.test(ss))src=ss;}}catch(e){}"
+                + "return [pos,ep,src];})();";
     }
 
     // 把遥控条挂到当前会话的 RemoteMediaClient 上(注册状态回调与进度监听)。
