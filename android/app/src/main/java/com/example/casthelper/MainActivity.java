@@ -262,7 +262,7 @@ public class MainActivity extends AppCompatActivity {
                             // 自动连播:正等下一集时,嗅探到不同于当前集、级别不低于当前集的
                             // 新直链就自动投出(级别判断挡住集间贴片广告)。
                             if (awaitingNext && pri >= priorityOf(lastCastUrl)
-                                    && !baseOf(u).equals(baseOf(lastCastUrl))) {
+                                    && !episodeKey(u).equals(episodeKey(lastCastUrl))) {
                                 stopAutoNextWait();
                                 CastSession s = castContext == null ? null
                                         : castContext.getSessionManager().getCurrentCastSession();
@@ -295,6 +295,7 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
+                addRecent(url, view.getTitle()); // 记进“最近浏览”,下次开 App 回到这
                 // 页面开播一阵还嗅探不到直链的话,探测是否 blob/加密流并提示。
                 uiHandler.removeCallbacks(blobProbe);
                 uiHandler.postDelayed(blobProbe, 12000);
@@ -306,6 +307,7 @@ public class MainActivity extends AppCompatActivity {
                 // 否则一键投出去的还是上一集。
                 if (!noFragment(url).equals(noFragment(lastPageUrl))) {
                     lastPageUrl = url;
+                    addRecent(url, view.getTitle()); // SPA 站内换集也记进“最近浏览”
                     detectedUrl = null;
                     detectedPriority = 0;
                     altStreamUrl = null;
@@ -335,7 +337,14 @@ public class MainActivity extends AppCompatActivity {
         setupShortcuts();
         setupControls();
 
-        web.loadUrl("https://www.google.com");
+        // 开 App 直接回到最近浏览的那一页(登录 Cookie 持久,回去即可续看)。
+        String last = null;
+        try {
+            org.json.JSONArray arr = new org.json.JSONArray(
+                    getSharedPreferences("cast_helper", MODE_PRIVATE).getString("recent", "[]"));
+            if (arr.length() > 0) last = arr.getJSONObject(0).optString("u", null);
+        } catch (Exception ignored) {}
+        web.loadUrl(last != null ? last : "https://www.google.com");
     }
 
     private void setupControls() {
@@ -360,7 +369,7 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnStop).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (remoteClient == null) return;
-                setLocalPauseGuard(false); // 先解除守卫,回手机能正常播放
+                restoreLocalPlayback(); // 解除守卫 + 取消静音,回手机能正常播放
                 syncBackToPage(); // 把电视看到的进度写回网页播放器,回手机能接着看
                 remoteClient.stop();
             }
@@ -460,6 +469,21 @@ public class MainActivity extends AppCompatActivity {
     private void setupShortcuts() {
         LinearLayout bar = findViewById(R.id.shortcuts);
         int gap = Math.round(4 * getResources().getDisplayMetrics().density);
+        // 快捷行开头放一个「🕘 最近」,点开弹出最近浏览列表。
+        Button recent = new Button(this);
+        recent.setText("🕘 最近");
+        recent.setAllCaps(false);
+        recent.setMinWidth(0);
+        recent.setMinimumWidth(0);
+        recent.setPadding(gap * 3, gap, gap * 3, gap);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rlp.setMargins(gap, gap, gap, gap);
+        recent.setLayoutParams(rlp);
+        recent.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showRecentDialog(); }
+        });
+        bar.addView(recent);
         for (final String[] site : SITES) {
             Button b = new Button(this);
             b.setText(site[0]);
@@ -613,7 +637,7 @@ public class MainActivity extends AppCompatActivity {
                 new ResultCallback<RemoteMediaClient.MediaChannelResult>() {
                     @Override public void onResult(RemoteMediaClient.MediaChannelResult r) {
                         if (!r.getStatus().isSuccess()) {
-                            setLocalPauseGuard(false); // 投放被拒:解除守卫,别把本地播放也一起锁死
+                            restoreLocalPlayback(); // 投放被拒:解除守卫 + 取消静音,别把本地播放锁死/静音
                             toast("投屏请求没成功(" + r.getStatus().getStatusCode() + "),请重试");
                         }
                     }
@@ -652,7 +676,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean tryCastPreloadedNext() {
         String preloaded = detectedUrl;
         if (preloaded == null || priorityOf(preloaded) < priorityOf(lastCastUrl)
-                || baseOf(preloaded).equals(baseOf(lastCastUrl))) return false;
+                || episodeKey(preloaded).equals(episodeKey(lastCastUrl))) return false;
         CastSession s = castContext == null ? null
                 : castContext.getSessionManager().getCurrentCastSession();
         if (s == null || !s.isConnected()) return false;
@@ -779,8 +803,10 @@ public class MainActivity extends AppCompatActivity {
                 + "try{_v.currentTime=" + pos + ";}catch(e){}})();", null);
     }
 
-    private static String baseOf(String u) {
-        return u == null ? "" : u.split("[?#]")[0];
+    // 判断“是不是另一集”的 key:只去掉 #fragment,保留 query。有的站两集只差 ?id=,
+    // 若把 query 也去掉,不同集会被当成同一集,自动连播就接不上下一集。
+    private static String episodeKey(String u) {
+        return u == null ? "" : u.split("#")[0];
     }
 
     // JS 片段:遍历主页面和所有同源 iframe,把匹配 selector 的媒体元素收进 _vs
@@ -799,6 +825,67 @@ public class MainActivity extends AppCompatActivity {
     // 打开/关闭“保持暂停”守卫(Java 侧薄封装,供停止投屏 / 投放被拒 / 会话结束等路径调用)。
     private void setLocalPauseGuard(boolean on) {
         if (web != null) web.evaluateJavascript(jsSetPauseGuard(on), null);
+    }
+
+    // 停止投屏 / 投放失败 / 会话结束时:解除守卫,并把投屏时静音的网页视频取消静音,
+    // 免得用户回手机接着看却没声音(投屏时是特意静音+暂停的)。
+    private void restoreLocalPlayback() {
+        if (web == null) return;
+        web.evaluateJavascript(jsSetPauseGuard(false)
+                + "(function(){" + jsCollectMedia("video,audio")
+                + "for(var i=0;i<_vs.length;i++){try{_vs[i].muted=false;}catch(e){}}})();", null);
+    }
+
+    // 记进“最近浏览”(URL + 标题):去重(同 URL 提到最前)、最新在前、最多 12 条。
+    // 首页/搜索页不记。供开 App 续看和「🕘 最近」列表用。
+    private void addRecent(String url, String title) {
+        if (url == null) return;
+        String lu = url.toLowerCase(Locale.US);
+        if (!lu.startsWith("http://") && !lu.startsWith("https://")) return;
+        if (lu.contains("://www.google.") || lu.contains("/search?")) return;
+        try {
+            android.content.SharedPreferences sp = getSharedPreferences("cast_helper", MODE_PRIVATE);
+            org.json.JSONArray old = new org.json.JSONArray(sp.getString("recent", "[]"));
+            org.json.JSONArray out = new org.json.JSONArray();
+            org.json.JSONObject head = new org.json.JSONObject();
+            head.put("u", url);
+            head.put("t", (title == null || title.trim().isEmpty() || title.startsWith("http"))
+                    ? url : title.trim());
+            out.put(head);
+            for (int i = 0; i < old.length() && out.length() < 12; i++) {
+                org.json.JSONObject o = old.getJSONObject(i);
+                if (!url.equals(o.optString("u"))) out.put(o);
+            }
+            sp.edit().putString("recent", out.toString()).apply();
+        } catch (Exception ignored) {}
+    }
+
+    // 弹出「最近浏览」列表,点一条回到那一页(标题不可用时显示网址)。
+    private void showRecentDialog() {
+        try {
+            org.json.JSONArray arr = new org.json.JSONArray(
+                    getSharedPreferences("cast_helper", MODE_PRIVATE).getString("recent", "[]"));
+            if (arr.length() == 0) { toast("还没有最近浏览记录"); return; }
+            final String[] urls = new String[arr.length()];
+            final String[] titles = new String[arr.length()];
+            for (int i = 0; i < arr.length(); i++) {
+                org.json.JSONObject o = arr.getJSONObject(i);
+                urls[i] = o.optString("u");
+                titles[i] = o.optString("t", urls[i]);
+            }
+            new androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("最近浏览")
+                    .setItems(titles, new android.content.DialogInterface.OnClickListener() {
+                        @Override public void onClick(android.content.DialogInterface d, int which) {
+                            urlBar.setText(urls[which]);
+                            load();
+                        }
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
+        } catch (Exception e) {
+            toast("读取最近记录失败");
+        }
     }
 
     // 投屏成功后,把 App 内网页里正在放的音视频暂停并静音(含同源 iframe),并挂上
@@ -825,31 +912,39 @@ public class MainActivity extends AppCompatActivity {
     private static final Pattern EPISODE = Pattern.compile(
             "第\\s*[0-9一二三四五六七八九十百零]+\\s*[集话話期]|[Ee][Pp]?\\s*\\d{1,4}|\\d{1,3}\\s*[集话話期]");
 
-    // 投屏标题:用当前网页标题,截掉“站名/在线观看”等后缀,尽量留下剧名 + 集数。
-    // 分隔符含无空格连字符(爱壹帆「剧名-免费在线观看-爱壹帆」)、下划线、竖线、破折号。
+    // 标题右侧的“垃圾尾巴”:分隔符(下划线/竖线/间隔号/各种连字符)+ 含站名或“在线观看/
+    // 高清/全N集”等词的一段,直到结尾。用来从右往左逐段剥掉,只删已知后缀,不见连字符就砍。
+    private static final Pattern JUNK_TAIL = Pattern.compile(
+            "\\s*[_|·\\-–—]\\s*[^_|·\\-–—]*(?:"
+            + "在线观看|免费观看|在线播放|高清|完整版|蓝光|正片|"
+            + "全[0-9零一二三四五六七八九十百]+集|更新至?[0-9零一二三四五六七八九十百]+集|更新中|共[0-9零一二三四五六七八九十百]+集|全集|"
+            + "电视剧|电影|综艺|动漫|纪录片|视频|大全|"
+            + "爱壹帆|欧乐影院|欧乐|芒果TV|哔哩哔哩|bilibili|优酷|腾讯视频|爱奇艺|西瓜视频|YouTube|iyf"
+            + ")[^_|·\\-–—]*\\s*$",
+            Pattern.CASE_INSENSITIVE);
+
+    // 投屏标题:从当前网页标题从右往左剥掉“站名 / 在线观看 / 全N集”等已知后缀,留下剧名;
+    // 只删已知后缀,不会遇到连字符就截断(Spider-Man / X-Men 保持完整)。
     // 标题里没有集数时,用从页面选中集读到的 episodeHint 补上。
     private String castTitle() {
         String t = web == null ? null : web.getTitle();
         if (t != null) t = t.trim();
         if (TextUtils.isEmpty(t) || t.startsWith("http")) return "投屏";
-        String[] parts = t.split("\\s*[_|·]\\s*|\\s*[-–—]\\s*");
-        String out = parts[0].trim();
-        if (out.length() < 2) out = t; // 首段太短(没按预期分隔),退回整串
-        if (!EPISODE.matcher(out).find()) {
-            String ep = null;
-            for (int i = 1; i < parts.length; i++) {
-                String p = parts[i].replaceAll("(在线观看|免费观看|高清|完整版|无删减).*$", "").trim();
-                // “全30集 / 更新至10集 / 共24集”是总集数,不是当前集数,跳过
-                if (p.isEmpty() || p.contains("全") || p.contains("更新") || p.contains("共")) continue;
-                if (p.length() <= 20 && EPISODE.matcher(p).find()) { ep = p; break; }
-            }
-            if (ep == null && !TextUtils.isEmpty(episodeHint) && EPISODE.matcher(episodeHint).find()) {
-                ep = episodeHint; // 标题不含集数(如爱壹帆),用页面里读到的选中集
-            }
-            if (ep != null) out = out + " " + ep;
+        for (int guard = 0; guard < 6; guard++) {
+            Matcher m = JUNK_TAIL.matcher(t);
+            if (!m.find()) break;
+            String s = t.substring(0, m.start()).trim();
+            if (s.length() < 2) break; // 别把整串都删没了
+            t = s;
         }
-        if (out.length() > 60) out = out.substring(0, 60) + "…";
-        return out;
+        // 下划线/竖线/间隔号几乎总是分隔符,换成空格;连字符保留(可能是片名的一部分)。
+        t = t.replaceAll("\\s*[_|·]\\s*", " ").trim();
+        if (!EPISODE.matcher(t).find()
+                && !TextUtils.isEmpty(episodeHint) && EPISODE.matcher(episodeHint).find()) {
+            t = t + " " + episodeHint; // 标题不含集数(如爱壹帆),用页面里读到的选中集补上
+        }
+        if (t.length() > 60) t = t.substring(0, 60) + "…";
+        return t;
     }
 
     // 采集当前正片:进度(秒)+ 页面“选中集”的第N集文案 + 该 <video> 自己暴露的 http(s) 直链。
@@ -920,7 +1015,7 @@ public class MainActivity extends AppCompatActivity {
         stopAutoNextWait();
         errorAwaitingVariant = false;
         uiHandler.removeCallbacks(errorGiveUp);
-        setLocalPauseGuard(false); // 会话没了,解除本地暂停守卫
+        restoreLocalPlayback(); // 会话没了,解除守卫 + 取消静音
     }
 
     private void refreshControls() {

@@ -14,7 +14,7 @@ android {
         minSdk 21
         targetSdk 34
         versionCode 2 + buildNumber
-        versionName '1.5.' + buildNumber
+        versionName '1.6.' + buildNumber
     }
 
     compileOptions {
