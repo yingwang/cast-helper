@@ -862,10 +862,18 @@ public class MainActivity extends AppCompatActivity {
                 + "var ep='';try{var ds=[document];(function gd(w){try{for(var j=0;j<w.frames.length;j++){"
                 + "var fw=w.frames[j],d=fw.document;if(d){ds.push(d);gd(fw);}}}catch(e){}})(window);"
                 + "var re=/第\\s*[0-9一二三四五六七八九十百零]+\\s*[集话話期]|[Ee][Pp]\\s*\\d{1,4}/;"
-                + "var sel='[class*=\"active\"],[class*=\"cur\"],[class*=\"playing\"],[class*=\"selected\"],.on,.act';"
+                + "var sel='[class*=\"active\"],[class*=\"selected\"],[class*=\"current\"],[class*=\"playing\"],.on';"
                 + "for(var di=0;di<ds.length&&!ep;di++){var els=ds[di].querySelectorAll(sel);"
-                + "for(var i=0;i<els.length;i++){var tx=(els[i].textContent||'').replace(/\\s+/g,'');"
-                + "if(tx.length<=10){var m=tx.match(re);if(m){ep=m[0];break;}}}}"
+                + "for(var i=0;i<els.length;i++){var el=els[i];"
+                + "if(!el.offsetParent)continue;"                                  // 只认当前可见的高亮项(挡掉隐藏/残留)
+                + "var tx=(el.textContent||'').replace(/\\s+/g,'');"
+                + "if(tx.length>10)continue;var m=tx.match(re);if(!m)continue;"
+                + "var node=el,ok=false;"                                          // 且它得在“一整排第N集”的选集列表里
+                + "for(var up=0;up<3&&node&&!ok;up++){var pr=node.parentElement;if(!pr)break;"
+                + "var ch=pr.children,cnt=0;for(var k=0;k<ch.length;k++){"
+                + "var t2=(ch[k].textContent||'').replace(/\\s+/g,'');if(t2.length<=10&&re.test(t2))cnt++;}"
+                + "if(cnt>=3)ok=true;node=pr;}"
+                + "if(ok){ep=m[0];break;}}}"                                       // 电影页没有这种列表 → ep 为空,不加集数
                 + "}catch(e){}"
                 + "var src='';try{if(_v){var ss=(_v.currentSrc||_v.src||'');if(/^https?:/i.test(ss))src=ss;}}catch(e){}"
                 + "return [pos,ep,src];})();";
