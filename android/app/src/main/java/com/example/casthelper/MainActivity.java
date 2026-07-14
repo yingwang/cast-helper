@@ -295,7 +295,7 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                rememberUrl(url); // 记住这一页,下次开 App 回到这
+                addRecent(url, view.getTitle()); // 记进“最近浏览”,下次开 App 回到这
                 // 页面开播一阵还嗅探不到直链的话,探测是否 blob/加密流并提示。
                 uiHandler.removeCallbacks(blobProbe);
                 uiHandler.postDelayed(blobProbe, 12000);
@@ -307,7 +307,7 @@ public class MainActivity extends AppCompatActivity {
                 // 否则一键投出去的还是上一集。
                 if (!noFragment(url).equals(noFragment(lastPageUrl))) {
                     lastPageUrl = url;
-                    rememberUrl(url); // SPA 站内换集也记住
+                    addRecent(url, view.getTitle()); // SPA 站内换集也记进“最近浏览”
                     detectedUrl = null;
                     detectedPriority = 0;
                     altStreamUrl = null;
@@ -337,8 +337,13 @@ public class MainActivity extends AppCompatActivity {
         setupShortcuts();
         setupControls();
 
-        // 记住上次浏览的页面,开 App 直接回到那(登录 Cookie 持久,回去即可续看)。
-        String last = getSharedPreferences("cast_helper", MODE_PRIVATE).getString("last_url", null);
+        // 开 App 直接回到最近浏览的那一页(登录 Cookie 持久,回去即可续看)。
+        String last = null;
+        try {
+            org.json.JSONArray arr = new org.json.JSONArray(
+                    getSharedPreferences("cast_helper", MODE_PRIVATE).getString("recent", "[]"));
+            if (arr.length() > 0) last = arr.getJSONObject(0).optString("u", null);
+        } catch (Exception ignored) {}
         web.loadUrl(last != null ? last : "https://www.google.com");
     }
 
@@ -464,6 +469,21 @@ public class MainActivity extends AppCompatActivity {
     private void setupShortcuts() {
         LinearLayout bar = findViewById(R.id.shortcuts);
         int gap = Math.round(4 * getResources().getDisplayMetrics().density);
+        // 快捷行开头放一个「🕘 最近」,点开弹出最近浏览列表。
+        Button recent = new Button(this);
+        recent.setText("🕘 最近");
+        recent.setAllCaps(false);
+        recent.setMinWidth(0);
+        recent.setMinimumWidth(0);
+        recent.setPadding(gap * 3, gap, gap * 3, gap);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rlp.setMargins(gap, gap, gap, gap);
+        recent.setLayoutParams(rlp);
+        recent.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showRecentDialog(); }
+        });
+        bar.addView(recent);
         for (final String[] site : SITES) {
             Button b = new Button(this);
             b.setText(site[0]);
@@ -816,12 +836,56 @@ public class MainActivity extends AppCompatActivity {
                 + "for(var i=0;i<_vs.length;i++){try{_vs[i].muted=false;}catch(e){}}})();", null);
     }
 
-    // 记住最后浏览的网页,下次开 App 直接回到那一页(登录 Cookie 本就持久,回去即可续看)。
-    private void rememberUrl(String url) {
+    // 记进“最近浏览”(URL + 标题):去重(同 URL 提到最前)、最新在前、最多 12 条。
+    // 首页/搜索页不记。供开 App 续看和「🕘 最近」列表用。
+    private void addRecent(String url, String title) {
         if (url == null) return;
-        String u = url.toLowerCase(Locale.US);
-        if (!u.startsWith("http://") && !u.startsWith("https://")) return;
-        getSharedPreferences("cast_helper", MODE_PRIVATE).edit().putString("last_url", url).apply();
+        String lu = url.toLowerCase(Locale.US);
+        if (!lu.startsWith("http://") && !lu.startsWith("https://")) return;
+        if (lu.contains("://www.google.") || lu.contains("/search?")) return;
+        try {
+            android.content.SharedPreferences sp = getSharedPreferences("cast_helper", MODE_PRIVATE);
+            org.json.JSONArray old = new org.json.JSONArray(sp.getString("recent", "[]"));
+            org.json.JSONArray out = new org.json.JSONArray();
+            org.json.JSONObject head = new org.json.JSONObject();
+            head.put("u", url);
+            head.put("t", (title == null || title.trim().isEmpty() || title.startsWith("http"))
+                    ? url : title.trim());
+            out.put(head);
+            for (int i = 0; i < old.length() && out.length() < 12; i++) {
+                org.json.JSONObject o = old.getJSONObject(i);
+                if (!url.equals(o.optString("u"))) out.put(o);
+            }
+            sp.edit().putString("recent", out.toString()).apply();
+        } catch (Exception ignored) {}
+    }
+
+    // 弹出「最近浏览」列表,点一条回到那一页(标题不可用时显示网址)。
+    private void showRecentDialog() {
+        try {
+            org.json.JSONArray arr = new org.json.JSONArray(
+                    getSharedPreferences("cast_helper", MODE_PRIVATE).getString("recent", "[]"));
+            if (arr.length() == 0) { toast("还没有最近浏览记录"); return; }
+            final String[] urls = new String[arr.length()];
+            final String[] titles = new String[arr.length()];
+            for (int i = 0; i < arr.length(); i++) {
+                org.json.JSONObject o = arr.getJSONObject(i);
+                urls[i] = o.optString("u");
+                titles[i] = o.optString("t", urls[i]);
+            }
+            new androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("最近浏览")
+                    .setItems(titles, new android.content.DialogInterface.OnClickListener() {
+                        @Override public void onClick(android.content.DialogInterface d, int which) {
+                            urlBar.setText(urls[which]);
+                            load();
+                        }
+                    })
+                    .setNegativeButton("取消", null)
+                    .show();
+        } catch (Exception e) {
+            toast("读取最近记录失败");
+        }
     }
 
     // 投屏成功后,把 App 内网页里正在放的音视频暂停并静音(含同源 iframe),并挂上
